@@ -6,7 +6,7 @@ alwaysApply: false
 
 # Phone app USB deploy
 
-After building or changing the Android app, do **not** use `adb install -r` alone when deploying to a connected phone.
+After building or changing the Android app, deploy to the USB-connected phone when one is available — do **not** use `adb install -r` alone.
 
 Always use the full restart workflow so the new APK is loaded:
 

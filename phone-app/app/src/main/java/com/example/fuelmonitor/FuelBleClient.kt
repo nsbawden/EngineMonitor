@@ -67,7 +67,8 @@ class FuelBleClient(
             val name = readName(result)
             val address = readAddress(device)
             val matchesRemembered = rememberedAddress != null && address == rememberedAddress
-            val matchesFuelMonitor = name == DeviceName || result.scanRecord?.serviceUuids?.any { it.uuid == ServiceUuid } == true
+            val matchesFuelMonitor = name == DeviceName || name == LegacyDeviceName ||
+                result.scanRecord?.serviceUuids?.any { it.uuid == ServiceUuid } == true
             if (matchesRemembered || matchesFuelMonitor) {
                 connect(device)
             }

@@ -8,7 +8,7 @@ Current sketch:
 - Assumes active-low injector pulses.
 - Prints telemetry over serial at 115200 baud.
 - Starts in bench simulator mode, equivalent to about 55 MPH at 10 MPG.
-- Advertises BLE device name `302 Fuel Monitor`.
+- Advertises BLE device name `ESP Engine Monitor`.
 - Notifies telemetry on service `5f6d9f20-6f2d-4f51-a2c7-302000000001`, characteristic `5f6d9f20-6f2d-4f51-a2c7-302000000002`.
 
 CLI build/upload from the repo root.

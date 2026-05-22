@@ -7,7 +7,8 @@ internal val TelemetryUuid: UUID = UUID.fromString("5f6d9f20-6f2d-4f51-a2c7-3020
 internal val ControlUuid: UUID = UUID.fromString("5f6d9f20-6f2d-4f51-a2c7-302000000003")
 internal val CccdUuid: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
-internal const val DeviceName = "302 Fuel Monitor"
+internal const val DeviceName = "ESP Engine Monitor"
+internal const val LegacyDeviceName = "302 Fuel Monitor"
 internal const val BenchSpeedMph = 55.0
 internal const val MinimumFuelFlowForMpgGph = 0.01
 internal const val MinimumSpeedForMpgMph = 1.0

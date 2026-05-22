@@ -33,7 +33,7 @@ constexpr float SIMULATED_SPEED_MPH = 55.0f;
 constexpr float SIMULATED_MPG = 10.0f;
 constexpr float SIMULATED_RPM = 2200.0f;
 
-constexpr char BLE_DEVICE_NAME[] = "302 Fuel Monitor";
+constexpr char BLE_DEVICE_NAME[] = "ESP Engine Monitor";
 constexpr char BLE_SERVICE_UUID[] = "5f6d9f20-6f2d-4f51-a2c7-302000000001";
 constexpr char BLE_TELEMETRY_CHAR_UUID[] = "5f6d9f20-6f2d-4f51-a2c7-302000000002";
 constexpr char BLE_CONTROL_CHAR_UUID[] = "5f6d9f20-6f2d-4f51-a2c7-302000000003";

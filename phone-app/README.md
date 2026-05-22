@@ -2,7 +2,7 @@
 
 Android client for the Engine Monitor ESP32 BLE telemetry.
 
-The app scans for the ESP32 BLE service, connects to `302 Fuel Monitor`, subscribes to telemetry notifications, parses the text packet, and displays injector pulse width, pulse rate, duty cycle, gallons/hour, GPS speed, and instantaneous MPG. Injector count, flow rate, and fuel calibration are configurable in settings for different multipoint EFI engines.
+The app scans for the ESP32 BLE service, connects to `ESP Engine Monitor`, subscribes to telemetry notifications, parses the text packet, and displays injector pulse width, pulse rate, duty cycle, gallons/hour, GPS speed, and instantaneous MPG. Injector count, flow rate, and fuel calibration are configurable in settings for different multipoint EFI engines.
 
 Open `phone-app` in Android Studio (or build from the command line), then run on a phone with Bluetooth and Location enabled. Android requires location permission for BLE scanning on older releases, and this app also uses GPS speed for MPG.
 

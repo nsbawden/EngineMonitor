@@ -1,0 +1,39 @@
+---
+description: Deploy ESP32 firmware after firmware changes (OTA or USB)
+globs: firmware/esp32/**
+alwaysApply: false
+---
+
+# ESP32 firmware deploy
+
+After building or changing ESP32 firmware, flash the device — do not leave compiled firmware only on disk.
+
+## OTA (preferred when Wi-Fi service is on)
+
+1. Confirm the ESP network port is visible:
+
+```powershell
+& "C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe" board list --format json
+```
+
+2. Compile with `PartitionScheme=no_fs` (see `firmware/esp32/README.md`).
+
+3. Upload with `espota.exe` using the IP from `board list` or the app Devices → OTA Wi-Fi screen:
+
+```powershell
+cd <repo-root>
+$buildPath = Join-Path (Get-Location) "firmware\esp32\injector_pulse_meter\build-no-fs"
+$espIp = "192.168.1.139"   # replace with detected IP
+& "$env:USERPROFILE\AppData\Local\Arduino15\packages\esp32\hardware\esp32\3.2.0\tools\espota.exe" -r -i $espIp -p 3232 "--auth=" -f "$buildPath\injector_pulse_meter.ino.bin"
+```
+
+## USB fallback
+
+Use when OTA is unavailable:
+
+```powershell
+$buildPath = Join-Path (Get-Location) "firmware\esp32\injector_pulse_meter\build-no-fs"
+& "C:\Program Files\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe" upload -p COM5 --fqbn esp32:esp32:esp32:PartitionScheme=no_fs --input-dir $buildPath firmware\esp32\injector_pulse_meter
+```
+
+Replace `COM5` with the port from `arduino-cli board list`.
