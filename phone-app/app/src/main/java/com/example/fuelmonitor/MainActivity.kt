@@ -54,6 +54,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
@@ -69,6 +70,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -134,6 +136,8 @@ private const val MAX_DISTANCE_SAMPLE_MS = 10_000L
 private const val MOVING_SPEED_THRESHOLD_MPH = 2.0
 private const val MAX_FUEL_INTEGRATION_MS = 5_000L
 private const val FuelDensityLbPerGallon = 6.17
+private const val WIFI_SERVICE_CONFIRM_TIMEOUT_MS = 18_000L
+private const val WIFI_JOIN_CONFIRM_TIMEOUT_MS = 35_000L
 
 class MainActivity : ComponentActivity() {
     private lateinit var fuelBleClient: FuelBleClient
@@ -209,8 +213,10 @@ class MainActivity : ComponentActivity() {
                     onScan = { fuelBleClient.startScan() },
                     onDisconnect = { fuelBleClient.disconnect() },
                     onSetEspSimulation = { fuelBleClient.setEspSimulation(it) },
-                    onSetEspWifiEnabled = { fuelBleClient.setEspWifiEnabled(it) },
-                    onConfigureEspWifi = { ssid, password -> fuelBleClient.configureEspWifi(ssid, password) },
+                    onSetEspWifiEnabled = { enabled, onResult -> fuelBleClient.setEspWifiEnabled(enabled, onResult) },
+                    onConfigureEspWifi = { ssid, password, onResult ->
+                        fuelBleClient.configureEspWifi(ssid, password, onResult)
+                    },
                     onSetPhoneSpeedSimulation = { enabled ->
                         appSettings = appSettings.copy(phoneSpeedSimulationEnabled = enabled)
                         saveSettings(appSettings)
@@ -740,8 +746,19 @@ private data class FuelBleState(
     val connected: Boolean = false,
     val controlReady: Boolean = false,
     val status: String = "Ready",
+    val wifiControlStatus: String = "",
     val telemetry: InjectorTelemetry = InjectorTelemetry()
 )
+
+private enum class WifiCredentialPhase {
+    Idle,
+    Sending,
+    Sent,
+    Failed,
+    WaitingJoin,
+    Joined,
+    TimedOut
+}
 
 private data class LocationState(
     val hasPermission: Boolean = false,
@@ -959,6 +976,7 @@ private class FuelBleClient(
     private var autoReconnectAttempt = 0
     private var controlCharacteristic: BluetoothGattCharacteristic? = null
     private var status = "Ready"
+    private var wifiControlStatus = ""
     private var telemetry = InjectorTelemetry()
 
     private val scanTimeout = Runnable {
@@ -1169,6 +1187,7 @@ private class FuelBleClient(
         closeGatt()
         connecting = false
         connected = false
+        wifiControlStatus = ""
         publish("Disconnected")
     }
 
@@ -1178,53 +1197,93 @@ private class FuelBleClient(
 
     @SuppressLint("MissingPermission")
     fun setEspSimulation(enabled: Boolean) {
-        writeControlCommand(if (enabled) "sim=1" else "sim=0") { accepted ->
-            if (accepted) "ESP ${if (enabled) "simulation" else "live input"} command sent" else "ESP command failed"
-        }
+        writeControlCommand(
+            if (enabled) "sim=1" else "sim=0",
+            statusMessage = { accepted ->
+                if (accepted) "ESP ${if (enabled) "simulation" else "live input"} command sent" else "ESP command failed"
+            }
+        )
     }
 
     fun syncInjectorCalibration(flowLbHr: Double, injectorCount: Int) {
         val flow = flowLbHr.coerceIn(1.0, 200.0)
         val count = injectorCount.coerceIn(1, 16)
-        writeControlCommand("flow=${"%.2f".format(Locale.US, flow)}") { accepted ->
-            if (accepted) "Injector flow sent to ESP" else "Injector flow command failed"
-        }
-        writeControlCommand("injectors=$count") { accepted ->
-            if (accepted) "Injector count sent to ESP" else "Injector count command failed"
-        }
+        writeControlCommand(
+            "flow=${"%.2f".format(Locale.US, flow)}",
+            statusMessage = { accepted ->
+                if (accepted) "Injector flow sent to ESP" else "Injector flow command failed"
+            }
+        )
+        writeControlCommand(
+            "injectors=$count",
+            statusMessage = { accepted ->
+                if (accepted) "Injector count sent to ESP" else "Injector count command failed"
+            }
+        )
     }
 
-    fun setEspWifiEnabled(enabled: Boolean) {
-        writeControlCommand(if (enabled) "wifi_on=1" else "wifi_on=0") { accepted ->
-            if (accepted) "ESP Wi-Fi ${if (enabled) "enable" else "disable"} command sent" else "ESP command failed"
-        }
+    fun setEspWifiEnabled(enabled: Boolean, onResult: ((Boolean) -> Unit)? = null) {
+        writeControlCommand(
+            if (enabled) "wifi_on=1" else "wifi_on=0",
+            updateWifiStatus = true,
+            statusMessage = { accepted ->
+                if (accepted) {
+                    "Wi-Fi service ${if (enabled) "starting on ESP…" else "stopping on ESP…"}"
+                } else {
+                    "Wi-Fi service command failed"
+                }
+            },
+            onComplete = onResult
+        )
     }
 
-    fun configureEspWifi(ssid: String, password: String) {
+    fun configureEspWifi(ssid: String, password: String, onResult: ((Boolean, String) -> Unit)? = null) {
         val cleanSsid = ssid.trim()
         if (cleanSsid.isBlank()) {
-            publish("Enter a Wi-Fi SSID first")
+            publishWifi("Enter a Wi-Fi SSID first")
+            onResult?.invoke(false, wifiControlStatus)
             return
         }
         if ('|' in cleanSsid || '|' in password) {
-            publish("Wi-Fi SSID/password cannot contain |")
+            publishWifi("Wi-Fi SSID/password cannot contain |")
+            onResult?.invoke(false, wifiControlStatus)
             return
         }
-        writeControlCommand("wifi=$cleanSsid|$password") { accepted ->
-            if (accepted) "Wi-Fi credentials sent to ESP" else "Wi-Fi command failed"
-        }
+        writeControlCommand(
+            "wifi=$cleanSsid|$password",
+            updateWifiStatus = true,
+            statusMessage = { accepted ->
+                if (accepted) {
+                    "Credentials queued for \"$cleanSsid\". Waiting for ESP to join…"
+                } else {
+                    "Could not send Wi-Fi credentials"
+                }
+            },
+            onComplete = { accepted ->
+                onResult?.invoke(accepted, wifiControlStatus)
+            }
+        )
     }
 
     @SuppressLint("MissingPermission")
-    private fun writeControlCommand(command: String, statusMessage: (Boolean) -> String) {
+    private fun writeControlCommand(
+        command: String,
+        updateWifiStatus: Boolean = false,
+        statusMessage: (Boolean) -> String,
+        onComplete: ((Boolean) -> Unit)? = null
+    ) {
         val characteristic = controlCharacteristic
         val activeGatt = gatt
         if (!connected || characteristic == null || activeGatt == null) {
-            publish("ESP control not ready")
+            val message = "ESP control not ready"
+            if (updateWifiStatus) publishWifi(message) else publish(message)
+            onComplete?.invoke(false)
             return
         }
         if (!hasConnectPermission()) {
-            publish("Bluetooth connect permission needed")
+            val message = "Bluetooth connect permission needed"
+            if (updateWifiStatus) publishWifi(message) else publish(message)
+            onComplete?.invoke(false)
             return
         }
 
@@ -1238,7 +1297,13 @@ private class FuelBleClient(
             @Suppress("DEPRECATION")
             activeGatt.writeCharacteristic(characteristic)
         }
-        publish(statusMessage(accepted))
+        val message = statusMessage(accepted)
+        if (updateWifiStatus) {
+            publishWifi(message)
+        } else {
+            publish(message)
+        }
+        onComplete?.invoke(accepted)
     }
 
     @SuppressLint("MissingPermission")
@@ -1276,7 +1341,7 @@ private class FuelBleClient(
         if (bytes == null) return
         val packet = bytes.toString(StandardCharsets.UTF_8)
         telemetry = parseTelemetry(packet)
-        handler.post { publish("Receiving telemetry") }
+        handler.post { publishTelemetry() }
     }
 
     private fun parseTelemetry(packet: String): InjectorTelemetry {
@@ -1304,6 +1369,20 @@ private class FuelBleClient(
 
     private fun publish(message: String) {
         status = message
+        emitState()
+    }
+
+    private fun publishWifi(message: String) {
+        wifiControlStatus = message
+        emitState()
+    }
+
+    private fun publishTelemetry() {
+        status = "Receiving telemetry"
+        emitState()
+    }
+
+    private fun emitState() {
         val adapter = bluetoothManager?.adapter
         onState(
             FuelBleState(
@@ -1315,6 +1394,7 @@ private class FuelBleClient(
                 connected = connected,
                 controlReady = controlCharacteristic != null,
                 status = status,
+                wifiControlStatus = wifiControlStatus,
                 telemetry = telemetry
             )
         )
@@ -1480,8 +1560,8 @@ private fun FuelMonitorApp(
     onScan: () -> Unit,
     onDisconnect: () -> Unit,
     onSetEspSimulation: (Boolean) -> Unit,
-    onSetEspWifiEnabled: (Boolean) -> Unit,
-    onConfigureEspWifi: (String, String) -> Unit,
+    onSetEspWifiEnabled: (Boolean, (Boolean) -> Unit) -> Unit,
+    onConfigureEspWifi: (String, String, (Boolean, String) -> Unit) -> Unit,
     onSetPhoneSpeedSimulation: (Boolean) -> Unit,
     onPrepareVehicleTest: () -> Unit,
     onSettingsChanged: (AppSettings) -> Unit,
@@ -2920,8 +3000,8 @@ private fun DevicesScreen(
     onScan: () -> Unit,
     onDisconnect: () -> Unit,
     onSetEspSimulation: (Boolean) -> Unit,
-    onSetEspWifiEnabled: (Boolean) -> Unit,
-    onConfigureEspWifi: (String, String) -> Unit,
+    onSetEspWifiEnabled: (Boolean, (Boolean) -> Unit) -> Unit,
+    onConfigureEspWifi: (String, String, (Boolean, String) -> Unit) -> Unit,
     onSetPhoneSpeedSimulation: (Boolean) -> Unit,
     onPrepareVehicleTest: () -> Unit,
     scrollState: ScrollState,
@@ -3002,61 +3082,223 @@ private fun DevicesScreen(
                 }
             }
         }
-        Surface(color = Panel, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("OTA Wi-Fi", fontWeight = FontWeight.SemiBold)
-                if (bleState.connected) {
-                    DeviceSwitchRow(
-                        title = "ESP Wi-Fi service",
-                        detail = when {
-                            bleState.telemetry.wifiConnected -> "Connected at ${bleState.telemetry.otaIp}"
-                            bleState.telemetry.wifiServiceEnabled -> "On; waiting for remembered network or credentials"
-                            else -> "Off until software update is needed"
-                        },
-                        checked = bleState.telemetry.wifiServiceEnabled,
-                        enabled = bleState.controlReady,
-                        onCheckedChange = onSetEspWifiEnabled
-                    )
-                    Text(
-                        if (bleState.telemetry.wifiServiceEnabled) {
-                            if (bleState.telemetry.wifiConnected) {
-                                "ESP joined Wi-Fi. OTA IP: ${bleState.telemetry.otaIp}"
-                            } else {
-                                "Wi-Fi service is on. Send credentials if it has not joined your hotspot."
+        OtaWifiCard(
+            bleState = bleState,
+            wifiSsid = wifiSsid,
+            wifiPassword = wifiPassword,
+            onWifiSsidChange = { wifiSsid = it },
+            onWifiPasswordChange = { wifiPassword = it },
+            onSetEspWifiEnabled = onSetEspWifiEnabled,
+            onConfigureEspWifi = onConfigureEspWifi,
+            onClearFocus = { focusManager.clearFocus() }
+        )
+    }
+}
+
+@Composable
+private fun OtaWifiCard(
+    bleState: FuelBleState,
+    wifiSsid: String,
+    wifiPassword: String,
+    onWifiSsidChange: (String) -> Unit,
+    onWifiPasswordChange: (String) -> Unit,
+    onSetEspWifiEnabled: (Boolean, (Boolean) -> Unit) -> Unit,
+    onConfigureEspWifi: (String, String, (Boolean, String) -> Unit) -> Unit,
+    onClearFocus: () -> Unit
+) {
+    var desiredWifiOn by remember { mutableStateOf<Boolean?>(null) }
+    var wifiServicePending by remember { mutableStateOf(false) }
+    var wifiServiceError by remember { mutableStateOf<String?>(null) }
+    var credentialPhase by remember { mutableStateOf(WifiCredentialPhase.Idle) }
+    var lastSentSsid by remember { mutableStateOf("") }
+    var joinWatchStartedMs by remember { mutableStateOf(0L) }
+
+    val telemetryWifiOn = bleState.telemetry.wifiServiceEnabled
+    val displayWifiOn = desiredWifiOn ?: telemetryWifiOn
+
+    LaunchedEffect(telemetryWifiOn, desiredWifiOn) {
+        if (desiredWifiOn != null && telemetryWifiOn == desiredWifiOn) {
+            desiredWifiOn = null
+            wifiServicePending = false
+            wifiServiceError = null
+        }
+    }
+
+    LaunchedEffect(wifiServicePending, desiredWifiOn) {
+        if (!wifiServicePending) return@LaunchedEffect
+        delay(WIFI_SERVICE_CONFIRM_TIMEOUT_MS)
+        if (wifiServicePending && desiredWifiOn != null && telemetryWifiOn != desiredWifiOn) {
+            wifiServicePending = false
+            wifiServiceError = "Wi-Fi service did not confirm on the ESP. Try the toggle again."
+            desiredWifiOn = null
+        }
+    }
+
+    LaunchedEffect(bleState.telemetry.wifiConnected, credentialPhase) {
+        if (credentialPhase == WifiCredentialPhase.WaitingJoin &&
+            bleState.telemetry.wifiConnected &&
+            bleState.telemetry.wifiServiceEnabled
+        ) {
+            credentialPhase = WifiCredentialPhase.Joined
+        }
+    }
+
+    LaunchedEffect(credentialPhase, joinWatchStartedMs) {
+        if (credentialPhase != WifiCredentialPhase.WaitingJoin || joinWatchStartedMs <= 0L) return@LaunchedEffect
+        delay(WIFI_JOIN_CONFIRM_TIMEOUT_MS)
+        if (credentialPhase == WifiCredentialPhase.WaitingJoin) {
+            credentialPhase = WifiCredentialPhase.TimedOut
+        }
+    }
+
+    LaunchedEffect(bleState.connected) {
+        if (!bleState.connected) {
+            desiredWifiOn = null
+            wifiServicePending = false
+            wifiServiceError = null
+            credentialPhase = WifiCredentialPhase.Idle
+            lastSentSsid = ""
+            joinWatchStartedMs = 0L
+        }
+    }
+
+    val joinStatusText = when {
+        !bleState.connected -> "Connect over BLE to configure OTA Wi-Fi."
+        credentialPhase == WifiCredentialPhase.Sending -> "Sending credentials to ESP…"
+        credentialPhase == WifiCredentialPhase.Failed -> bleState.wifiControlStatus.ifBlank { "Could not send credentials." }
+        credentialPhase == WifiCredentialPhase.TimedOut && lastSentSsid.isNotBlank() ->
+            "No join yet for \"$lastSentSsid\". Check SSID spelling and password, then send again."
+        credentialPhase == WifiCredentialPhase.Joined || bleState.telemetry.wifiConnected ->
+            "Joined Wi-Fi. OTA IP: ${bleState.telemetry.otaIp}"
+        credentialPhase == WifiCredentialPhase.WaitingJoin && lastSentSsid.isNotBlank() ->
+            "Trying to join \"$lastSentSsid\"… (may take up to ${WIFI_JOIN_CONFIRM_TIMEOUT_MS / 1000}s)"
+        bleState.telemetry.wifiServiceEnabled && lastSentSsid.isNotBlank() && !bleState.telemetry.wifiConnected ->
+            "Wi-Fi on; still waiting to join \"$lastSentSsid\"."
+        bleState.telemetry.wifiServiceEnabled ->
+            "Wi-Fi service on. Enter SSID and password, then send once."
+        else -> "Turn on Wi-Fi service before sending credentials."
+    }
+
+    val joinStatusColor = when {
+        credentialPhase == WifiCredentialPhase.Joined || bleState.telemetry.wifiConnected -> BatteryGreen
+        credentialPhase == WifiCredentialPhase.TimedOut ||
+            credentialPhase == WifiCredentialPhase.Failed ||
+            wifiServiceError != null -> Color(0xFFFF8A65)
+        else -> TextMuted
+    }
+
+    Surface(color = Panel, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("OTA Wi-Fi", fontWeight = FontWeight.SemiBold)
+            Text(
+                "1) Turn on Wi-Fi service and wait for confirmation.\n" +
+                    "2) Enter the network name exactly as your router shows it.\n" +
+                    "3) Tap Send once and watch the status line below.",
+                color = TextMuted,
+                fontSize = 13.sp
+            )
+            if (bleState.connected) {
+                DeviceSwitchRow(
+                    title = "ESP Wi-Fi service",
+                    detail = when {
+                        wifiServicePending && desiredWifiOn == true -> "Starting on ESP (scan/connect can take 10–20 s)…"
+                        wifiServicePending && desiredWifiOn == false -> "Stopping on ESP…"
+                        bleState.telemetry.wifiConnected -> "Connected at ${bleState.telemetry.otaIp}"
+                        bleState.telemetry.wifiServiceEnabled -> "On — send credentials below when ready"
+                        else -> "Off until you need a firmware update"
+                    },
+                    checked = displayWifiOn,
+                    enabled = bleState.controlReady && !wifiServicePending,
+                    pending = wifiServicePending,
+                    onCheckedChange = { enabled ->
+                        desiredWifiOn = enabled
+                        wifiServicePending = true
+                        wifiServiceError = null
+                        onSetEspWifiEnabled(enabled) { accepted ->
+                            if (!accepted) {
+                                wifiServicePending = false
+                                desiredWifiOn = null
+                                wifiServiceError = "Could not reach ESP to change Wi-Fi service."
                             }
-                        } else {
-                            "BLE remains available while ESP Wi-Fi is off."
-                        },
-                        color = TextMuted,
-                        fontSize = 13.sp
-                    )
-                    OutlinedTextField(
-                        value = wifiSsid,
-                        onValueChange = { wifiSsid = it },
-                        label = { Text("Wi-Fi SSID") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = wifiPassword,
-                        onValueChange = { wifiPassword = it },
-                        label = { Text("Wi-Fi password") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Button(
-                        onClick = {
-                            focusManager.clearFocus()
-                            onConfigureEspWifi(wifiSsid, wifiPassword)
-                        },
-                        enabled = bleState.controlReady && wifiSsid.isNotBlank(),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Send Wi-Fi to ESP")
+                        }
                     }
-                } else {
-                    Text("Connect over BLE to enable Wi-Fi for OTA updates.", color = TextMuted, fontSize = 13.sp)
+                )
+                if (wifiServiceError != null) {
+                    Text(wifiServiceError!!, color = Color(0xFFFF8A65), fontSize = 13.sp)
                 }
+                if (bleState.wifiControlStatus.isNotBlank()) {
+                    Text(bleState.wifiControlStatus, color = TextMuted, fontSize = 13.sp)
+                }
+                Text(joinStatusText, color = joinStatusColor, fontSize = 13.sp)
+                OutlinedTextField(
+                    value = wifiSsid,
+                    onValueChange = {
+                        onWifiSsidChange(it)
+                        if (credentialPhase == WifiCredentialPhase.TimedOut || credentialPhase == WifiCredentialPhase.Failed) {
+                            credentialPhase = WifiCredentialPhase.Idle
+                        }
+                    },
+                    label = { Text("Wi-Fi SSID (exact name)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = wifiPassword,
+                    onValueChange = onWifiPasswordChange,
+                    label = { Text("Wi-Fi password") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                val sendEnabled = bleState.controlReady &&
+                    wifiSsid.isNotBlank() &&
+                    credentialPhase != WifiCredentialPhase.Sending &&
+                    telemetryWifiOn
+                Button(
+                    onClick = {
+                        onClearFocus()
+                        val ssid = wifiSsid.trim()
+                        lastSentSsid = ssid
+                        joinWatchStartedMs = System.currentTimeMillis()
+                        credentialPhase = WifiCredentialPhase.Sending
+                        onConfigureEspWifi(ssid, wifiPassword) { accepted, _ ->
+                            credentialPhase = if (accepted) {
+                                WifiCredentialPhase.WaitingJoin
+                            } else {
+                                WifiCredentialPhase.Failed
+                            }
+                        }
+                    },
+                    enabled = sendEnabled,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (credentialPhase == WifiCredentialPhase.Sending) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                            Text("Sending…")
+                        }
+                    } else {
+                        Text(
+                            when (credentialPhase) {
+                                WifiCredentialPhase.WaitingJoin -> "Credentials sent — waiting for join"
+                                WifiCredentialPhase.Joined -> "Joined — send again to change network"
+                                WifiCredentialPhase.TimedOut, WifiCredentialPhase.Failed -> "Send again"
+                                else -> "Send Wi-Fi to ESP"
+                            }
+                        )
+                    }
+                }
+                if (!telemetryWifiOn) {
+                    Text("Turn on ESP Wi-Fi service before sending credentials.", color = TextMuted, fontSize = 13.sp)
+                }
+            } else {
+                Text(joinStatusText, color = TextMuted, fontSize = 13.sp)
             }
         }
     }
@@ -3068,6 +3310,7 @@ private fun DeviceSwitchRow(
     detail: String,
     checked: Boolean,
     enabled: Boolean,
+    pending: Boolean = false,
     onCheckedChange: (Boolean) -> Unit
 ) {
     Row(
@@ -3079,11 +3322,15 @@ private fun DeviceSwitchRow(
             Text(title, fontWeight = FontWeight.SemiBold)
             Text(detail, color = TextMuted, fontSize = 13.sp)
         }
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            enabled = enabled
-        )
+        if (pending) {
+            CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+        } else {
+            Switch(
+                checked = checked,
+                onCheckedChange = onCheckedChange,
+                enabled = enabled
+            )
+        }
     }
 }
 
