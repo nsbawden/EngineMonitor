@@ -14,7 +14,10 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
@@ -45,6 +48,9 @@ class FuelBleClient(
     private var autoReconnectRetriesRemaining = 0
     private var autoReconnectAttempt = 0
     private var controlCharacteristic: BluetoothGattCharacteristic? = null
+    private var connectedDevice: BluetoothDevice? = null
+    private var pendingControlAction: (() -> Unit)? = null
+    private var bondReceiverRegistered = false
     private var status = "Ready"
     private var wifiControlStatus = ""
     private var telemetry = InjectorTelemetry()
@@ -59,6 +65,24 @@ class FuelBleClient(
         if (!userDisconnectRequested && rememberedAddress != null && !connected && !connecting && !scanning) {
             startScan(auto = true)
         }
+    }
+
+    private val bondReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
+            val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+            } ?: return
+            if (device.address != connectedDevice?.address) return
+            handler.post { handleBondStateChanged(device.bondState) }
+        }
+    }
+
+    init {
+        registerBondReceiver()
     }
 
     private val scanCallback = object : ScanCallback() {
@@ -133,7 +157,7 @@ class FuelBleClient(
                 }
                 enableNotifications(gatt, characteristic)
                 if (hasConnectPermission()) gatt.readCharacteristic(characteristic)
-                publish(if (controlCharacteristic != null) "Receiving telemetry; controls ready" else "Receiving telemetry")
+                requestControlBond()
             }
         }
 
@@ -243,6 +267,7 @@ class FuelBleClient(
             .putString(PREF_DEVICE_NAME, name)
             .apply()
         publish("Connecting to $name")
+        connectedDevice = device
         gatt = device.connectGatt(appContext, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
@@ -264,6 +289,7 @@ class FuelBleClient(
 
     fun close() {
         disconnect()
+        unregisterBondReceiver()
     }
 
     @SuppressLint("MissingPermission")
@@ -358,6 +384,27 @@ class FuelBleClient(
             return
         }
 
+        withControlBond {
+            performControlWrite(
+                activeGatt = activeGatt,
+                characteristic = characteristic,
+                command = command,
+                updateWifiStatus = updateWifiStatus,
+                statusMessage = statusMessage,
+                onComplete = onComplete
+            )
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun performControlWrite(
+        activeGatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        command: String,
+        updateWifiStatus: Boolean,
+        statusMessage: (Boolean) -> String,
+        onComplete: ((Boolean) -> Unit)?
+    ) {
         val bytes = command.toByteArray(StandardCharsets.UTF_8)
         characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         val accepted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -378,6 +425,95 @@ class FuelBleClient(
     }
 
     @SuppressLint("MissingPermission")
+    private fun withControlBond(action: () -> Unit) {
+        val device = connectedDevice
+        if (device == null) {
+            publish("ESP control not ready")
+            return
+        }
+        when (device.bondState) {
+            BluetoothDevice.BOND_BONDED -> action()
+            BluetoothDevice.BOND_BONDING -> {
+                pendingControlAction = action
+                publish("Waiting for Bluetooth pairing…")
+            }
+            BluetoothDevice.BOND_NONE -> {
+                pendingControlAction = action
+                publish("Pairing with ESP for controls…")
+                device.createBond()
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun requestControlBond() {
+        if (controlCharacteristic == null) {
+            publish("Receiving telemetry")
+            return
+        }
+        val device = connectedDevice
+        if (device == null) {
+            publish("Receiving telemetry")
+            return
+        }
+        when (device.bondState) {
+            BluetoothDevice.BOND_BONDED -> publishControlReady()
+            BluetoothDevice.BOND_BONDING -> publish("Receiving telemetry; finishing Bluetooth pairing…")
+            BluetoothDevice.BOND_NONE -> {
+                publish("Receiving telemetry; pairing with ESP for controls…")
+                device.createBond()
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun handleBondStateChanged(bondState: Int) {
+        when (bondState) {
+            BluetoothDevice.BOND_BONDED -> {
+                publishControlReady()
+                pendingControlAction?.invoke()
+                pendingControlAction = null
+            }
+            BluetoothDevice.BOND_NONE -> {
+                if (pendingControlAction != null) {
+                    publish("Bluetooth pairing required for ESP controls")
+                } else if (controlCharacteristic != null && connected) {
+                    publish("Receiving telemetry; pairing required for controls")
+                }
+                pendingControlAction = null
+                emitState()
+            }
+        }
+    }
+
+    private fun publishControlReady() {
+        publish(if (controlCharacteristic != null) "Receiving telemetry; controls ready" else "Receiving telemetry")
+    }
+
+    private fun isControlBonded(): Boolean {
+        val device = connectedDevice ?: return false
+        return hasConnectPermission() && device.bondState == BluetoothDevice.BOND_BONDED
+    }
+
+    private fun registerBondReceiver() {
+        if (bondReceiverRegistered) return
+        val filter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            appContext.registerReceiver(bondReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            appContext.registerReceiver(bondReceiver, filter)
+        }
+        bondReceiverRegistered = true
+    }
+
+    private fun unregisterBondReceiver() {
+        if (!bondReceiverRegistered) return
+        runCatching { appContext.unregisterReceiver(bondReceiver) }
+        bondReceiverRegistered = false
+    }
+
+    @SuppressLint("MissingPermission")
     private fun stopScan(doneStatus: String) {
         if (scanning && hasScanPermission()) scanner?.stopScan(scanCallback)
         scanning = false
@@ -391,6 +527,8 @@ class FuelBleClient(
         if (hasConnectPermission()) gatt?.close()
         gatt = null
         controlCharacteristic = null
+        connectedDevice = null
+        pendingControlAction = null
     }
 
     @SuppressLint("MissingPermission")
@@ -464,7 +602,7 @@ class FuelBleClient(
                 scanning = scanning,
                 connecting = connecting,
                 connected = connected,
-                controlReady = controlCharacteristic != null,
+                controlReady = controlCharacteristic != null && isControlBonded(),
                 status = status,
                 wifiControlStatus = wifiControlStatus,
                 telemetry = telemetry

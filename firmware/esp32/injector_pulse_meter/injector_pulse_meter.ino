@@ -22,6 +22,7 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include <BLESecurity.h>
 #endif
 
 constexpr uint8_t INJECTOR_PIN = 27;
@@ -73,6 +74,8 @@ uint8_t wifiNetworkCount = 0;
 int8_t activeWifiIndex = -1;
 uint32_t lastWifiAttemptMillis = 0;
 Preferences preferences;
+uint8_t wifiEncKey[16] = {0};
+bool wifiEncKeyReady = false;
 
 #if ENABLE_BLE
 BLECharacteristic *telemetryCharacteristic = nullptr;
@@ -106,6 +109,60 @@ String currentWifiTelemetrySsid() {
     return sanitizeTelemetryToken(wifiSsid);
   }
   return String();
+}
+
+void ensureWifiEncKey() {
+  if (wifiEncKeyReady) {
+    return;
+  }
+  if (preferences.getBytesLength("wifi_key") == sizeof(wifiEncKey)) {
+    preferences.getBytes("wifi_key", wifiEncKey, sizeof(wifiEncKey));
+  } else {
+    esp_fill_random(wifiEncKey, sizeof(wifiEncKey));
+    preferences.putBytes("wifi_key", wifiEncKey, sizeof(wifiEncKey));
+  }
+  wifiEncKeyReady = true;
+}
+
+bool isEncryptedWifiPassword(const String &stored) {
+  return stored.startsWith("e:");
+}
+
+String encryptWifiPassword(const String &plain) {
+  if (plain.length() == 0) {
+    return String();
+  }
+  ensureWifiEncKey();
+  String out = "e:";
+  out.reserve(2 + plain.length() * 2);
+  for (size_t i = 0; i < plain.length(); i++) {
+    const uint8_t b = static_cast<uint8_t>(plain.charAt(i)) ^ wifiEncKey[i % sizeof(wifiEncKey)];
+    char buf[3];
+    snprintf(buf, sizeof(buf), "%02x", b);
+    out += buf;
+  }
+  return out;
+}
+
+String decryptWifiPassword(const String &stored) {
+  if (stored.length() == 0) {
+    return String();
+  }
+  if (!isEncryptedWifiPassword(stored)) {
+    return stored;
+  }
+  ensureWifiEncKey();
+  const String hex = stored.substring(2);
+  if (hex.length() == 0 || (hex.length() % 2) != 0) {
+    return String();
+  }
+  String plain;
+  plain.reserve(hex.length() / 2);
+  for (size_t i = 0; i < hex.length(); i += 2) {
+    const uint8_t b = static_cast<uint8_t>(strtoul(hex.substring(i, i + 2).c_str(), nullptr, 16));
+    plain += static_cast<char>(b ^ wifiEncKey[(i / 2) % sizeof(wifiEncKey)]);
+  }
+  return plain;
 }
 
 bool isInjectorOn(int level) {
@@ -143,6 +200,36 @@ void updateControlValue() {
 
 void applyCommand(String command, bool printUnknown);
 
+class FuelMonitorSecurityCallbacks : public BLESecurityCallbacks {
+  uint32_t onPassKeyRequest() override {
+    return 0;
+  }
+
+  void onPassKeyNotify(uint32_t pass_key) override {
+    Serial.print("BLE pairing PIN ");
+    Serial.println(pass_key);
+  }
+
+  bool onSecurityRequest() override {
+    return true;
+  }
+
+  void onAuthenticationComplete(esp_ble_auth_cmpl_t authResult) override {
+    if (authResult.success) {
+      Serial.println("BLE pairing complete");
+    } else {
+      Serial.print("BLE pairing failed: ");
+      Serial.println(authResult.fail_reason, HEX);
+    }
+  }
+
+  bool onConfirmPIN(uint32_t pin) override {
+    Serial.print("BLE confirm PIN ");
+    Serial.println(pin);
+    return true;
+  }
+};
+
 class FuelMonitorControlCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *characteristic) override {
     String command = characteristic->getValue();
@@ -166,6 +253,15 @@ class FuelMonitorServerCallbacks : public BLEServerCallbacks {
 
 void setupBle() {
   BLEDevice::init(BLE_DEVICE_NAME);
+  BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
+  BLEDevice::setSecurityCallbacks(new FuelMonitorSecurityCallbacks());
+
+  BLESecurity *security = new BLESecurity();
+  security->setAuthenticationMode(ESP_LE_AUTH_BOND);
+  security->setCapability(ESP_IO_CAP_NONE);
+  security->setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+  security->setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+
   BLEServer *server = BLEDevice::createServer();
   server->setCallbacks(new FuelMonitorServerCallbacks());
 
@@ -180,6 +276,8 @@ void setupBle() {
   controlCharacteristic = service->createCharacteristic(
       BLE_CONTROL_CHAR_UUID,
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
+  controlCharacteristic->setAccessPermissions(
+      ESP_GATT_PERM_READ_ENCRYPTED | ESP_GATT_PERM_WRITE_ENCRYPTED);
   controlCharacteristic->setCallbacks(new FuelMonitorControlCallbacks());
   updateControlValue();
 
@@ -196,34 +294,52 @@ void setupBle() {
 
 void loadDeviceSettings() {
   preferences.begin("fuelmon", false);
+  ensureWifiEncKey();
   simulatedTelemetryEnabled = preferences.getBool("sim", SIMULATED_TELEMETRY_DEFAULT);
   wifiServiceEnabled = preferences.getBool("wifi_on", false);
   wifiNetworkCount = preferences.getUChar("wifi_count", 0);
   if (wifiNetworkCount > MAX_WIFI_NETWORKS) {
     wifiNetworkCount = MAX_WIFI_NETWORKS;
   }
+  bool migratePlaintextPasswords = false;
   for (uint8_t i = 0; i < wifiNetworkCount; i++) {
     wifiSsids[i] = preferences.getString(("ssid" + String(i)).c_str(), "");
-    wifiPasswords[i] = preferences.getString(("pass" + String(i)).c_str(), "");
+    const String storedPass = preferences.getString(("pass" + String(i)).c_str(), "");
+    if (storedPass.length() > 0 && !isEncryptedWifiPassword(storedPass)) {
+      wifiPasswords[i] = storedPass;
+      migratePlaintextPasswords = true;
+    } else {
+      wifiPasswords[i] = decryptWifiPassword(storedPass);
+    }
   }
 
   const String legacySsid = preferences.getString("ssid", "");
   if (wifiNetworkCount == 0 && legacySsid.length() > 0) {
     wifiSsids[0] = legacySsid;
-    wifiPasswords[0] = preferences.getString("pass", "");
+    const String legacyPass = preferences.getString("pass", "");
+    if (legacyPass.length() > 0 && !isEncryptedWifiPassword(legacyPass)) {
+      wifiPasswords[0] = legacyPass;
+      migratePlaintextPasswords = true;
+    } else {
+      wifiPasswords[0] = decryptWifiPassword(legacyPass);
+    }
     wifiNetworkCount = 1;
     preferences.putUChar("wifi_count", wifiNetworkCount);
     preferences.putString("ssid0", wifiSsids[0]);
-    preferences.putString("pass0", wifiPasswords[0]);
+    preferences.putString("pass0", encryptWifiPassword(wifiPasswords[0]));
   }
   wifiConfigured = wifiNetworkCount > 0;
+  if (migratePlaintextPasswords) {
+    saveWifiList();
+  }
 }
 
 void saveWifiList() {
   preferences.putUChar("wifi_count", wifiNetworkCount);
   for (uint8_t i = 0; i < MAX_WIFI_NETWORKS; i++) {
     preferences.putString(("ssid" + String(i)).c_str(), i < wifiNetworkCount ? wifiSsids[i] : "");
-    preferences.putString(("pass" + String(i)).c_str(), i < wifiNetworkCount ? wifiPasswords[i] : "");
+    const String pass = i < wifiNetworkCount ? wifiPasswords[i] : String();
+    preferences.putString(("pass" + String(i)).c_str(), pass.length() > 0 ? encryptWifiPassword(pass) : "");
   }
 }
 
