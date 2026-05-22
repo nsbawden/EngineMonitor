@@ -387,17 +387,18 @@ class MainActivity : ComponentActivity() {
         val flow = appSettings.injectorFlowLbHr
         val count = appSettings.injectorCount
         if (lastSyncedInjectorFlowLbHr == flow && lastSyncedInjectorCount == count) return
-        fuelBleClient.syncInjectorCalibration(flow, count)
         lastSyncedInjectorFlowLbHr = flow
         lastSyncedInjectorCount = count
+        fuelBleClient.syncInjectorCalibration(flow, count)
     }
 
     private fun acceptBleState(state: FuelBleState) {
         val now = System.currentTimeMillis()
+        val controlJustReady = state.controlReady && !bleState.controlReady
         if (!state.connected) {
             lastSyncedInjectorFlowLbHr = null
             lastSyncedInjectorCount = null
-        } else if (state.controlReady) {
+        } else if (controlJustReady) {
             maybeSyncInjectorSettingsToEsp()
         }
         if (lastFuelSampleMs > 0L && state.connected) {
