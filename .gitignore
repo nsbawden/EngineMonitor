@@ -1,0 +1,32 @@
+# Android
+*.hprof
+phone-app/.gradle/
+phone-app/.idea/
+phone-app/local.properties
+phone-app/**/build/
+phone-app/**/*.apk
+phone-app/**/*.aab
+phone-app/**/.cxx/
+phone-app/captures/
+
+# ESP32 / Arduino build output
+firmware/**/build/
+firmware/**/build-*/
+firmware/**/*.bin
+firmware/**/*.elf
+firmware/**/*.map
+firmware/**/compile_commands.json
+firmware/**/libraries.cache
+firmware/**/includes.cache
+firmware/**/build.options.json
+
+# Local logs and exported phone data (may contain trip history)
+app_crash_log.txt
+fuel_history*.csv
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
