@@ -731,6 +731,7 @@ private data class InjectorTelemetry(
     val wifiServiceEnabled: Boolean = false,
     val wifiConnected: Boolean = false,
     val otaIp: String = "0.0.0.0",
+    val wifiAttemptSsid: String = "",
     val rawPacket: String = ""
 ) {
     val rpm: Double get() = pulsesPerSecond * 120.0
@@ -1363,6 +1364,7 @@ private class FuelBleClient(
             wifiServiceEnabled = values["wifi_on"] == "1",
             wifiConnected = values["wifi"] == "1",
             otaIp = values["ip"]?.takeIf { it.isNotBlank() } ?: "0.0.0.0",
+            wifiAttemptSsid = values["wifi_ssid"]?.takeIf { it.isNotBlank() }.orEmpty(),
             rawPacket = packet
         )
     }
@@ -3166,14 +3168,40 @@ private fun OtaWifiCard(
         !bleState.connected -> "Connect over BLE to configure OTA Wi-Fi."
         credentialPhase == WifiCredentialPhase.Sending -> "Sending credentials to ESP…"
         credentialPhase == WifiCredentialPhase.Failed -> bleState.wifiControlStatus.ifBlank { "Could not send credentials." }
-        credentialPhase == WifiCredentialPhase.TimedOut && lastSentSsid.isNotBlank() ->
-            "No join yet for \"$lastSentSsid\". Check SSID spelling and password, then send again."
-        credentialPhase == WifiCredentialPhase.Joined || bleState.telemetry.wifiConnected ->
-            "Joined Wi-Fi. OTA IP: ${bleState.telemetry.otaIp}"
-        credentialPhase == WifiCredentialPhase.WaitingJoin && lastSentSsid.isNotBlank() ->
-            "Trying to join \"$lastSentSsid\"… (may take up to ${WIFI_JOIN_CONFIRM_TIMEOUT_MS / 1000}s)"
-        bleState.telemetry.wifiServiceEnabled && lastSentSsid.isNotBlank() && !bleState.telemetry.wifiConnected ->
-            "Wi-Fi on; still waiting to join \"$lastSentSsid\"."
+        credentialPhase == WifiCredentialPhase.TimedOut && lastSentSsid.isNotBlank() -> {
+            val espSsid = bleState.telemetry.wifiAttemptSsid
+            if (espSsid.isNotBlank() && !espSsid.equals(lastSentSsid, ignoreCase = true)) {
+                "No join yet. ESP is trying \"$espSsid\" but you sent \"$lastSentSsid\". Check SSID spelling."
+            } else {
+                "No join yet for \"$lastSentSsid\". Check SSID spelling and password, then send again."
+            }
+        }
+        credentialPhase == WifiCredentialPhase.Joined || bleState.telemetry.wifiConnected -> {
+            val joined = bleState.telemetry.wifiAttemptSsid.ifBlank { lastSentSsid }
+            if (joined.isNotBlank()) {
+                "Joined \"$joined\". OTA IP: ${bleState.telemetry.otaIp}"
+            } else {
+                "Joined Wi-Fi. OTA IP: ${bleState.telemetry.otaIp}"
+            }
+        }
+        credentialPhase == WifiCredentialPhase.WaitingJoin && lastSentSsid.isNotBlank() -> {
+            val espSsid = bleState.telemetry.wifiAttemptSsid
+            if (espSsid.isNotBlank()) {
+                "ESP trying \"$espSsid\"… (may take up to ${WIFI_JOIN_CONFIRM_TIMEOUT_MS / 1000}s)"
+            } else {
+                "Trying to join \"$lastSentSsid\"… (may take up to ${WIFI_JOIN_CONFIRM_TIMEOUT_MS / 1000}s)"
+            }
+        }
+        bleState.telemetry.wifiServiceEnabled && lastSentSsid.isNotBlank() && !bleState.telemetry.wifiConnected -> {
+            val espSsid = bleState.telemetry.wifiAttemptSsid
+            if (espSsid.isNotBlank()) {
+                "Wi-Fi on; ESP trying \"$espSsid\"."
+            } else {
+                "Wi-Fi on; still waiting to join \"$lastSentSsid\"."
+            }
+        }
+        bleState.telemetry.wifiServiceEnabled && bleState.telemetry.wifiAttemptSsid.isNotBlank() && bleState.telemetry.wifiConnected ->
+            "Connected to \"${bleState.telemetry.wifiAttemptSsid}\" at ${bleState.telemetry.otaIp}"
         bleState.telemetry.wifiServiceEnabled ->
             "Wi-Fi service on. Enter SSID and password, then send once."
         else -> "Turn on Wi-Fi service before sending credentials."
@@ -3203,7 +3231,13 @@ private fun OtaWifiCard(
                     detail = when {
                         wifiServicePending && desiredWifiOn == true -> "Starting on ESP (scan/connect can take 10–20 s)…"
                         wifiServicePending && desiredWifiOn == false -> "Stopping on ESP…"
-                        bleState.telemetry.wifiConnected -> "Connected at ${bleState.telemetry.otaIp}"
+                        bleState.telemetry.wifiConnected -> {
+                            val ssid = bleState.telemetry.wifiAttemptSsid
+                            if (ssid.isNotBlank()) "Connected to \"$ssid\" at ${bleState.telemetry.otaIp}"
+                            else "Connected at ${bleState.telemetry.otaIp}"
+                        }
+                        bleState.telemetry.wifiServiceEnabled && bleState.telemetry.wifiAttemptSsid.isNotBlank() ->
+                            "Trying \"${bleState.telemetry.wifiAttemptSsid}\""
                         bleState.telemetry.wifiServiceEnabled -> "On — send credentials below when ready"
                         else -> "Off until you need a firmware update"
                     },

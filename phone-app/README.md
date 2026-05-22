@@ -21,7 +21,7 @@ BLE contract:
 - Device name: `302 Fuel Monitor`
 - Service UUID: `5f6d9f20-6f2d-4f51-a2c7-302000000001`
 - Telemetry characteristic UUID: `5f6d9f20-6f2d-4f51-a2c7-302000000002`
-- Packet example: `width_us=12178,pps=18.33,duty=0.2232,gph=5.500,flow_lb_hr=19.00,injectors=8,signal=1,sim=1`
+- Packet example: `width_us=12178,pps=18.33,duty=0.2232,gph=5.500,flow_lb_hr=19.00,injectors=8,signal=1,sim=1,wifi_on=1,wifi=1,ip=192.168.1.139,wifi_ssid=MyNetwork`
 
 History logging:
 

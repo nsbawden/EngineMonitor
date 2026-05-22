@@ -81,6 +81,33 @@ bool bleClientConnected = false;
 #endif
 bool otaStarted = false;
 
+String sanitizeTelemetryToken(const String &input) {
+  String out;
+  out.reserve(input.length());
+  for (size_t i = 0; i < input.length(); i++) {
+    const char c = input.charAt(i);
+    if (c == ',' || c == '=' || c == '|') {
+      out += '_';
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+
+String currentWifiTelemetrySsid() {
+  if (!wifiServiceEnabled) {
+    return String();
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    return sanitizeTelemetryToken(WiFi.SSID());
+  }
+  if (wifiSsid.length() > 0) {
+    return sanitizeTelemetryToken(wifiSsid);
+  }
+  return String();
+}
+
 bool isInjectorOn(int level) {
   return INJECTOR_ACTIVE_LOW ? (level == LOW) : (level == HIGH);
 }
@@ -162,7 +189,7 @@ void setupBle() {
   advertising->addServiceUUID(BLE_SERVICE_UUID);
   advertising->setScanResponse(true);
   advertising->setMinPreferred(0x06);
-  advertising->setMinPreferred(0x12);
+  advertising->setMaxPreferred(0x12);
   advertising->start();
 }
 #endif
@@ -547,9 +574,10 @@ void loop() {
 
   const bool wifiConnected = WiFi.status() == WL_CONNECTED;
   const String otaIp = wifiConnected ? WiFi.localIP().toString() : "0.0.0.0";
-  char packet[220];
+  const String wifiTelemetrySsid = currentWifiTelemetrySsid();
+  char packet[320];
   snprintf(packet, sizeof(packet),
-           "width_us=%lu,pps=%.2f,duty=%.4f,gph=%.3f,flow_lb_hr=%.2f,injectors=%u,signal=%u,sim=%u,wifi_on=%u,wifi=%u,ip=%s",
+           "width_us=%lu,pps=%.2f,duty=%.4f,gph=%.3f,flow_lb_hr=%.2f,injectors=%u,signal=%u,sim=%u,wifi_on=%u,wifi=%u,ip=%s,wifi_ssid=%s",
            static_cast<unsigned long>(reportedPulseWidth),
            pulsesPerSecond,
            duty,
@@ -560,7 +588,8 @@ void loop() {
            simulatedTelemetryEnabled ? 1 : 0,
            wifiServiceEnabled ? 1 : 0,
            wifiConnected ? 1 : 0,
-           otaIp.c_str());
+           otaIp.c_str(),
+           wifiTelemetrySsid.c_str());
 
   Serial.println(packet);
 
