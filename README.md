@@ -1,8 +1,8 @@
-# 302 Engine Monitor
+# Engine Monitor
 
-Instantaneous fuel-use monitor for a 1989 Ford 302 EFI engine.
+Instantaneous fuel-use monitor for multipoint EFI engines.
 
-The first prototype targets an ESP32 reading one injector pulse signal through a protected input circuit, then sending pulse timing data to a phone app. The phone app supplies GPS speed and computes instantaneous fuel economy.
+An ESP32 reads one injector pulse signal through a protected input circuit and streams pulse timing over BLE. The Android app supplies GPS speed, configurable injector count and flow calibration, and computes instantaneous fuel economy, trips, fill-ups, and history.
 
 ## Layout
 
@@ -17,3 +17,7 @@ The first prototype targets an ESP32 reading one injector pulse signal through a
 3. Stream pulse timing over serial.
 4. Add BLE telemetry.
 5. Combine injector timing with phone GPS speed.
+
+## License
+
+Released under [The Unlicense](LICENSE) (public domain dedication).

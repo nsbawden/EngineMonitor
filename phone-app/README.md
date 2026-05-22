@@ -1,12 +1,20 @@
-# 302 Fuel Monitor Android App
+# Engine Monitor Android App
 
-Simple native Android app for the first ESP32 BLE telemetry milestone.
+Android client for the Engine Monitor ESP32 BLE telemetry.
 
-The app scans for the ESP32 BLE service, connects to `302 Fuel Monitor`, subscribes to telemetry notifications, parses the text packet, and displays injector pulse width, pulse rate, duty cycle, gallons/hour, GPS speed, and instantaneous MPG.
+The app scans for the ESP32 BLE service, connects to `302 Fuel Monitor`, subscribes to telemetry notifications, parses the text packet, and displays injector pulse width, pulse rate, duty cycle, gallons/hour, GPS speed, and instantaneous MPG. Injector count, flow rate, and fuel calibration are configurable in settings for different multipoint EFI engines.
 
-Open `phone-app` in Android Studio, let Gradle sync, then run it on an Android phone with Bluetooth and Location enabled. Android requires location permission for BLE scanning on older releases, and this app also uses GPS speed for MPG.
+Open `phone-app` in Android Studio (or build from the command line), then run on a phone with Bluetooth and Location enabled. Android requires location permission for BLE scanning on older releases, and this app also uses GPS speed for MPG.
 
-The debug APK builds at `phone-app/app/build/outputs/apk/debug/app-debug.apk`.
+## Build
+
+From `phone-app`:
+
+```powershell
+.\gradlew.bat assembleDebug
+```
+
+The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 BLE contract:
 
