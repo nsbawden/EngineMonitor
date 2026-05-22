@@ -1,0 +1,27 @@
+---
+description: Deploy phone-app debug APK with force-stop and relaunch over USB
+globs: phone-app/**
+alwaysApply: false
+---
+
+# Phone app USB deploy
+
+After building or changing the Android app, do **not** use `adb install -r` alone when deploying to a connected phone.
+
+Always use the full restart workflow so the new APK is loaded:
+
+```powershell
+cd phone-app
+.\gradlew.bat assembleDebug
+.\install-debug.ps1
+```
+
+Or run the equivalent steps manually:
+
+```powershell
+adb shell am force-stop com.example.fuelmonitor
+adb install -r phone-app\app\build\outputs\apk\debug\app-debug.apk
+adb shell am start -n com.example.fuelmonitor/.MainActivity
+```
+
+`adb install -r` only replaces the package on disk. A running app keeps the old in-memory process until force-stopped or manually reopened.

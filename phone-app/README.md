@@ -16,6 +16,25 @@ From `phone-app`:
 
 The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
+## Install to USB-connected phone
+
+**Use the install script** (build first if needed). It force-stops the app, installs the APK, and launches `MainActivity` so you always run the new build:
+
+```powershell
+.\gradlew.bat assembleDebug
+.\install-debug.ps1
+```
+
+Do not rely on `adb install -r` alone — that updates the APK on disk but leaves a running app on the old process until you swipe it away or reopen it manually.
+
+Equivalent manual steps:
+
+```powershell
+adb shell am force-stop com.example.fuelmonitor
+adb install -r app\build\outputs\apk\debug\app-debug.apk
+adb shell am start -n com.example.fuelmonitor/.MainActivity
+```
+
 BLE contract:
 
 - Device name: `302 Fuel Monitor`
