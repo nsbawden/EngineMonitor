@@ -1,30 +1,9 @@
 package com.example.fuelmonitor
 
-import android.Manifest
-import android.annotation.SuppressLint
-import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothGatt
-import android.bluetooth.BluetoothGattCallback
-import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.BluetoothGattDescriptor
-import android.bluetooth.BluetoothManager
-import android.bluetooth.BluetoothProfile
-import android.bluetooth.BluetoothStatusCodes
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
-import android.bluetooth.le.ScanResult
-import android.bluetooth.le.ScanSettings
 import android.content.Context
-import android.content.SharedPreferences
 import android.content.pm.PackageManager
-import android.location.Location
-import android.location.LocationListener
-import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.os.ParcelUuid
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
@@ -107,37 +86,16 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.painterResource
 import androidx.core.content.ContextCompat
 import java.io.File
-import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
-import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.atan
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.sin
 
-private val ServiceUuid: UUID = UUID.fromString("5f6d9f20-6f2d-4f51-a2c7-302000000001")
-private val TelemetryUuid: UUID = UUID.fromString("5f6d9f20-6f2d-4f51-a2c7-302000000002")
-private val ControlUuid: UUID = UUID.fromString("5f6d9f20-6f2d-4f51-a2c7-302000000003")
-private val CccdUuid: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-private const val DeviceName = "302 Fuel Monitor"
-private const val BenchSpeedMph = 55.0
-private const val MinimumFuelFlowForMpgGph = 0.01
-private const val MinimumSpeedForMpgMph = 1.0
-private const val HistoryMpgDisplayCap = 60.0
-private const val DashboardMpgDisplayCap = 60.0
-private const val MissingHistoryValue = -999999.0
-private const val MIN_GRADE_DISTANCE_FEET = 100.0
-private const val MAX_GRADE_DISPLAY_PERCENT = 20.0
-private const val MAX_DISTANCE_SAMPLE_MS = 10_000L
-private const val MOVING_SPEED_THRESHOLD_MPH = 2.0
-private const val MAX_FUEL_INTEGRATION_MS = 5_000L
-private const val FuelDensityLbPerGallon = 6.17
-private const val WIFI_SERVICE_CONFIRM_TIMEOUT_MS = 18_000L
-private const val WIFI_JOIN_CONFIRM_TIMEOUT_MS = 35_000L
 
 class MainActivity : ComponentActivity() {
     private lateinit var fuelBleClient: FuelBleClient
@@ -409,7 +367,7 @@ class MainActivity : ComponentActivity() {
         }
         if (lastFuelSampleMs > 0L && state.connected) {
             val elapsedMs = (now - lastFuelSampleMs).coerceAtLeast(0L)
-            val integratedMs = minOf(elapsedMs, MAX_FUEL_INTEGRATION_MS)
+            val integratedMs = minOf(elapsedMs, MaxFuelIntegrationMs)
             val hours = integratedMs / 3_600_000.0
             val fuelGph = effectiveFuelGph(state.telemetry, appSettings)
             val gallons = fuelGph * hours
@@ -716,822 +674,6 @@ class MainActivity : ComponentActivity() {
         private const val HISTORY_SAMPLE_MS = 30_000L
         private const val HISTORY_PRUNE_MS = 10 * 60_000L
         private const val HISTORY_KEEP_DAYS = 30L
-    }
-}
-
-private data class InjectorTelemetry(
-    val widthUs: Double = 0.0,
-    val pulsesPerSecond: Double = 0.0,
-    val duty: Double = 0.0,
-    val gallonsPerHour: Double = 0.0,
-    val injectorFlowLbHr: Double = 19.0,
-    val injectorCount: Int = 8,
-    val signalActive: Boolean = false,
-    val simulatedTelemetryEnabled: Boolean = false,
-    val wifiServiceEnabled: Boolean = false,
-    val wifiConnected: Boolean = false,
-    val otaIp: String = "0.0.0.0",
-    val wifiAttemptSsid: String = "",
-    val rawPacket: String = ""
-) {
-    val rpm: Double get() = pulsesPerSecond * 120.0
-    fun mpg(speedMph: Double): Double = calculateInstantMpgForLiveFuel(gallonsPerHour, speedMph)
-}
-
-private data class FuelBleState(
-    val supported: Boolean = true,
-    val bluetoothEnabled: Boolean = false,
-    val hasPermissions: Boolean = false,
-    val scanning: Boolean = false,
-    val connecting: Boolean = false,
-    val connected: Boolean = false,
-    val controlReady: Boolean = false,
-    val status: String = "Ready",
-    val wifiControlStatus: String = "",
-    val telemetry: InjectorTelemetry = InjectorTelemetry()
-)
-
-private enum class WifiCredentialPhase {
-    Idle,
-    Sending,
-    Sent,
-    Failed,
-    WaitingJoin,
-    Joined,
-    TimedOut
-}
-
-private data class LocationState(
-    val hasPermission: Boolean = false,
-    val speedMph: Double = BenchSpeedMph,
-    val speedFromCurrentFix: Boolean = false,
-    val speedSimulated: Boolean = true,
-    val altitudeFt: Double = 0.0,
-    val hasAltitude: Boolean = false,
-    val altitudeFromCurrentFix: Boolean = false,
-    val usingFallbackSpeed: Boolean = true,
-    val status: String = "Bench speed simulation: 55 MPH"
-)
-
-private enum class AltitudeUnit(val label: String) {
-    Feet("ft"),
-    Meters("m")
-}
-
-private enum class GradeUnit(val label: String) {
-    Percent("%"),
-    Degrees("deg")
-}
-
-private data class AppSettings(
-    val tankCapacityGallons: Double = 25.0,
-    val fuelCalibrationMultiplier: Double = 1.0,
-    val injectorFlowLbHr: Double = 19.0,
-    val injectorCount: Int = 8,
-    val altitudeUnit: AltitudeUnit = AltitudeUnit.Feet,
-    val gradeUnit: GradeUnit = GradeUnit.Percent,
-    val calibrationStartOdometer: Double = 0.0,
-    val phoneSpeedSimulationEnabled: Boolean = true,
-    val dashboardAverageWindowHours: Double = 1.0,
-    val distanceScale: Double = 0.8,
-    val instantMpgGoodThreshold: Double = 7.0,
-    val keepScreenOn: Boolean = true
-)
-
-private data class ActiveTrip(
-    val active: Boolean = false,
-    val startOdometer: Double = 0.0,
-    val plannedMiles: Double = 0.0,
-    val startTimeMs: Long = 0L,
-    val fuelUsedGallons: Double = 0.0,
-    val distanceOffsetMiles: Double = 0.0,
-    val lastDistanceUpdateMs: Long = 0L,
-    val movingTimeMs: Long = 0L,
-    val arrived: Boolean = false,
-    val arrivedTimeMs: Long = 0L,
-    val arrivedFuelUsedGallons: Double = 0.0,
-    val arrivedAverageMpg: Double = 0.0,
-    val arrivedAverageSpeedMph: Double = 0.0
-)
-
-private data class GradeState(
-    val acceptedAltitudeFt: Double? = null,
-    val acceptedOdometer: Double? = null,
-    val gradePercent: Double? = null
-) {
-    fun accept(altitudeFt: Double, odometer: Double): GradeState {
-        if (!altitudeFt.isFinite() || !odometer.isFinite() || odometer <= 0.0) return this
-        val startAltitude = acceptedAltitudeFt
-        val startOdometer = acceptedOdometer
-        if (startAltitude == null || startOdometer == null || odometer < startOdometer) {
-            return copy(acceptedAltitudeFt = altitudeFt, acceptedOdometer = odometer)
-        }
-        val altitudeDelta = altitudeFt - startAltitude
-        if (abs(altitudeDelta) < 1.0) return this
-        val distanceFeet = (odometer - startOdometer) * 5280.0
-        if (distanceFeet < MIN_GRADE_DISTANCE_FEET) return this
-        val grade = (altitudeDelta / distanceFeet) * 100.0
-        return GradeState(
-            acceptedAltitudeFt = altitudeFt,
-            acceptedOdometer = odometer,
-            gradePercent = grade.takeIf { it.isFinite() }?.coerceIn(-MAX_GRADE_DISPLAY_PERCENT, MAX_GRADE_DISPLAY_PERCENT)
-        )
-    }
-}
-
-private data class FillupRecord(
-    val timestampMs: Long = 0L,
-    val odometer: Double = 0.0,
-    val gallonsAdded: Double = 0.0,
-    val pricePerGallon: Double = 0.0,
-    val totalCost: Double = 0.0,
-    val filledToFull: Boolean = true,
-    val mpgSinceLastFillup: Double = 0.0
-)
-
-private data class EconomySample(
-    val timestampMs: Long,
-    val miles: Double,
-    val gallons: Double
-)
-
-private data class FuelHistoryPoint(
-    val timestampMs: Long,
-    val dayKey: Int,
-    val speedMph: Double,
-    val rpm: Double,
-    val instantMpg: Double,
-    val gallonsPerHour: Double,
-    val injectorPulseWidthUs: Double,
-    val dutyPercent: Double,
-    val altitudeFt: Double,
-    val tankGallons: Double,
-    val espSimulated: Boolean,
-    val phoneSpeedSimulated: Boolean
-) {
-    fun toCsvLine(): String = listOf(
-        timestampMs,
-        dayKey,
-        speedMph,
-        rpm,
-        instantMpg,
-        gallonsPerHour,
-        injectorPulseWidthUs,
-        dutyPercent,
-        altitudeFt,
-        tankGallons,
-        if (espSimulated) 1 else 0,
-        if (phoneSpeedSimulated) 1 else 0
-    ).joinToString(",")
-
-    companion object {
-        fun fromCsvLine(line: String): FuelHistoryPoint? {
-            val parts = line.split(',')
-            if (parts.size < 5) return null
-            if (parts.size < 12) {
-                return FuelHistoryPoint(
-                    timestampMs = parts[0].toLongOrNull() ?: return null,
-                    dayKey = parts[1].toIntOrNull() ?: return null,
-                    speedMph = 0.0,
-                    rpm = 0.0,
-                    instantMpg = parts[2].toDoubleOrNull() ?: return null,
-                    gallonsPerHour = 0.0,
-                    injectorPulseWidthUs = 0.0,
-                    dutyPercent = 0.0,
-                    altitudeFt = parts[3].toDoubleOrNull() ?: return null,
-                    tankGallons = parts[4].toDoubleOrNull() ?: return null,
-                    espSimulated = false,
-                    phoneSpeedSimulated = false
-                ).takeIf { it.isUsable() }
-            }
-            return FuelHistoryPoint(
-                timestampMs = parts[0].toLongOrNull() ?: return null,
-                dayKey = parts[1].toIntOrNull() ?: return null,
-                speedMph = parts[2].toDoubleOrNull() ?: return null,
-                rpm = parts[3].toDoubleOrNull() ?: return null,
-                instantMpg = parts[4].toDoubleOrNull() ?: return null,
-                gallonsPerHour = parts[5].toDoubleOrNull() ?: return null,
-                injectorPulseWidthUs = parts[6].toDoubleOrNull() ?: return null,
-                dutyPercent = parts[7].toDoubleOrNull() ?: return null,
-                altitudeFt = parts[8].toDoubleOrNull() ?: return null,
-                tankGallons = parts[9].toDoubleOrNull() ?: return null,
-                espSimulated = parts[10] == "1",
-                phoneSpeedSimulated = parts[11] == "1"
-            ).takeIf { it.isUsable() }
-        }
-    }
-}
-
-private fun FuelHistoryPoint.isUsable(): Boolean {
-    return timestampMs > 0L &&
-        speedMph.isFinite() &&
-        rpm.isFinite() &&
-        instantMpg.isFinite() &&
-        gallonsPerHour.isFinite() &&
-        injectorPulseWidthUs.isFinite() &&
-        dutyPercent.isFinite() &&
-        altitudeFt.isFinite() &&
-        tankGallons.isFinite()
-}
-
-private fun effectiveFuelGph(telemetry: InjectorTelemetry, settings: AppSettings): Double {
-    val reported = telemetry.gallonsPerHour * settings.fuelCalibrationMultiplier
-    if (reported > MinimumFuelFlowForMpgGph) return reported
-    val duty = telemetry.duty
-    if (duty <= 0.0 || settings.injectorFlowLbHr <= 0.0 || settings.injectorCount <= 0) return 0.0
-    val estimated = (settings.injectorFlowLbHr * settings.injectorCount * duty) / FuelDensityLbPerGallon
-    return estimated * settings.fuelCalibrationMultiplier
-}
-
-private fun calculateInstantMpgForLiveFuel(fuelUseGph: Double, speedMph: Double): Double {
-    return if (fuelUseGph > MinimumFuelFlowForMpgGph && speedMph > MinimumSpeedForMpgMph) {
-        speedMph / fuelUseGph
-    } else {
-        0.0
-    }
-}
-
-private fun calculateInstantMpgForDisplay(connected: Boolean, fuelUseGph: Double, speedMph: Double): Double? {
-    if (!connected) return null
-    return calculateInstantMpgForLiveFuel(fuelUseGph, speedMph).coerceAtMost(DashboardMpgDisplayCap)
-}
-
-private class FuelBleClient(
-    context: Context,
-    private val onState: (FuelBleState) -> Unit
-) {
-    private val appContext = context.applicationContext
-    private val bluetoothManager = appContext.getSystemService(BluetoothManager::class.java)
-    private val prefs: SharedPreferences = appContext.getSharedPreferences("fuel_ble", Context.MODE_PRIVATE)
-    private val handler = Handler(Looper.getMainLooper())
-    private var scanner = bluetoothManager?.adapter?.bluetoothLeScanner
-    private var gatt: BluetoothGatt? = null
-    private var rememberedAddress: String? = prefs.getString(PREF_DEVICE_ADDRESS, null)
-    private var rememberedName: String? = prefs.getString(PREF_DEVICE_NAME, null)
-    private var scanning = false
-    private var autoScan = false
-    private var connecting = false
-    private var connected = false
-    private var userDisconnectRequested = false
-    private var autoReconnectRetriesRemaining = 0
-    private var autoReconnectAttempt = 0
-    private var controlCharacteristic: BluetoothGattCharacteristic? = null
-    private var status = "Ready"
-    private var wifiControlStatus = ""
-    private var telemetry = InjectorTelemetry()
-
-    private val scanTimeout = Runnable {
-        val wasAutoScan = autoScan
-        stopScan("Scan timed out")
-        if (wasAutoScan) scheduleAutoReconnect("ESP not found")
-    }
-
-    private val reconnectRunnable = Runnable {
-        if (!userDisconnectRequested && rememberedAddress != null && !connected && !connecting && !scanning) {
-            startScan(auto = true)
-        }
-    }
-
-    private val scanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val device = result.device ?: return
-            val name = readName(result)
-            val address = readAddress(device)
-            val matchesRemembered = rememberedAddress != null && address == rememberedAddress
-            val matchesFuelMonitor = name == DeviceName || result.scanRecord?.serviceUuids?.any { it.uuid == ServiceUuid } == true
-            if (matchesRemembered || matchesFuelMonitor) {
-                connect(device)
-            }
-        }
-
-        override fun onScanFailed(errorCode: Int) {
-            val wasAutoScan = autoScan
-            scanning = false
-            autoScan = false
-            publish("Scan failed: $errorCode")
-            if (wasAutoScan) scheduleAutoReconnect("Scan failed: $errorCode")
-        }
-    }
-
-    private val gattCallback = object : BluetoothGattCallback() {
-        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            handler.post {
-                when (newState) {
-                    BluetoothProfile.STATE_CONNECTED -> {
-                        scanning = false
-                        autoScan = false
-                        connecting = false
-                        connected = true
-                        autoReconnectRetriesRemaining = 0
-                        autoReconnectAttempt = 0
-                        publish("Connected; requesting MTU")
-                        if (hasConnectPermission() && !gatt.requestMtu(185)) {
-                            gatt.discoverServices()
-                        }
-                    }
-                    BluetoothProfile.STATE_DISCONNECTED -> {
-                        val shouldReconnect = !userDisconnectRequested && rememberedAddress != null
-                        connecting = false
-                        connected = false
-                        publish(if (status == BluetoothGatt.GATT_SUCCESS) "Disconnected" else "Disconnected: GATT $status")
-                        closeGatt()
-                        if (shouldReconnect) scheduleAutoReconnect("Disconnected")
-                    }
-                }
-            }
-        }
-
-        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-            handler.post {
-                publish("MTU $mtu; discovering services")
-                if (hasConnectPermission()) gatt.discoverServices()
-            }
-        }
-
-        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            handler.post {
-                val service = gatt.getService(ServiceUuid)
-                val characteristic = service?.getCharacteristic(TelemetryUuid)
-                controlCharacteristic = service?.getCharacteristic(ControlUuid)
-                if (status != BluetoothGatt.GATT_SUCCESS || characteristic == null) {
-                    publish("Telemetry service not found")
-                    connected = false
-                    connecting = false
-                    closeGatt()
-                    scheduleAutoReconnect("Telemetry service not found")
-                    return@post
-                }
-                enableNotifications(gatt, characteristic)
-                if (hasConnectPermission()) gatt.readCharacteristic(characteristic)
-                publish(if (controlCharacteristic != null) "Receiving telemetry; controls ready" else "Receiving telemetry")
-            }
-        }
-
-        @Deprecated("Older Android callback")
-        override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-            handleBytes(characteristic.value)
-        }
-
-        override fun onCharacteristicRead(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray,
-            status: Int
-        ) {
-            handleBytes(value)
-        }
-
-        @Deprecated("Older Android callback")
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            handleBytes(characteristic.value)
-        }
-
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray
-        ) {
-            handleBytes(value)
-        }
-    }
-
-    fun requiredPermissions(): Array<String> {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
-        } else {
-            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
-    }
-
-    fun hasPermissions(): Boolean = hasScanPermission() && hasConnectPermission()
-
-    fun refresh() {
-        scanner = bluetoothManager?.adapter?.bluetoothLeScanner
-        publish(status)
-        if (hasScanPermission() && hasConnectPermission() && rememberedAddress != null && !connected && !connecting && !scanning) {
-            autoReconnectRetriesRemaining = AUTO_RECONNECT_RETRIES
-            autoReconnectAttempt = 0
-            userDisconnectRequested = false
-            startScan(auto = true)
-        }
-    }
-
-    fun startScan() {
-        userDisconnectRequested = false
-        autoReconnectRetriesRemaining = AUTO_RECONNECT_RETRIES
-        autoReconnectAttempt = 0
-        startScan(auto = false)
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun startScan(auto: Boolean) {
-        val adapter = bluetoothManager?.adapter
-        if (adapter == null) {
-            publish("Bluetooth LE not supported")
-            return
-        }
-        if (!adapter.isEnabled) {
-            publish("Bluetooth is off")
-            return
-        }
-        if (!hasScanPermission()) {
-            publish("Bluetooth permission needed")
-            return
-        }
-        val scanner = scanner ?: run {
-            publish("BLE scanner unavailable")
-            return
-        }
-
-        closeGatt()
-        scanning = true
-        autoScan = auto
-        connecting = false
-        connected = false
-        publish(if (auto && rememberedName != null) "Auto-connecting to $rememberedName" else "Scanning for $DeviceName")
-        val filter = if (auto && rememberedAddress != null) null else ScanFilter.Builder().setServiceUuid(ParcelUuid(ServiceUuid)).build()
-        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
-        scanner.startScan(filter?.let { listOf(it) }, settings, scanCallback)
-        handler.removeCallbacks(scanTimeout)
-        handler.postDelayed(scanTimeout, 20_000L)
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun connect(device: BluetoothDevice) {
-        if (!hasConnectPermission()) {
-            publish("Bluetooth connect permission needed")
-            return
-        }
-        stopScan("Connecting")
-        connecting = true
-        val name = readDeviceName(device).ifBlank { DeviceName }
-        val address = readAddress(device)
-        rememberedAddress = address
-        rememberedName = name
-        prefs.edit()
-            .putString(PREF_DEVICE_ADDRESS, address)
-            .putString(PREF_DEVICE_NAME, name)
-            .apply()
-        publish("Connecting to $name")
-        gatt = device.connectGatt(appContext, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-    }
-
-    @SuppressLint("MissingPermission")
-    fun disconnect() {
-        userDisconnectRequested = true
-        autoReconnectRetriesRemaining = 0
-        autoReconnectAttempt = 0
-        handler.removeCallbacks(reconnectRunnable)
-        handler.removeCallbacks(scanTimeout)
-        stopScan("Disconnected")
-        if (hasConnectPermission()) gatt?.disconnect()
-        closeGatt()
-        connecting = false
-        connected = false
-        wifiControlStatus = ""
-        publish("Disconnected")
-    }
-
-    fun close() {
-        disconnect()
-    }
-
-    @SuppressLint("MissingPermission")
-    fun setEspSimulation(enabled: Boolean) {
-        writeControlCommand(
-            if (enabled) "sim=1" else "sim=0",
-            statusMessage = { accepted ->
-                if (accepted) "ESP ${if (enabled) "simulation" else "live input"} command sent" else "ESP command failed"
-            }
-        )
-    }
-
-    fun syncInjectorCalibration(flowLbHr: Double, injectorCount: Int) {
-        val flow = flowLbHr.coerceIn(1.0, 200.0)
-        val count = injectorCount.coerceIn(1, 16)
-        writeControlCommand(
-            "flow=${"%.2f".format(Locale.US, flow)}",
-            statusMessage = { accepted ->
-                if (accepted) "Injector flow sent to ESP" else "Injector flow command failed"
-            }
-        )
-        writeControlCommand(
-            "injectors=$count",
-            statusMessage = { accepted ->
-                if (accepted) "Injector count sent to ESP" else "Injector count command failed"
-            }
-        )
-    }
-
-    fun setEspWifiEnabled(enabled: Boolean, onResult: ((Boolean) -> Unit)? = null) {
-        writeControlCommand(
-            if (enabled) "wifi_on=1" else "wifi_on=0",
-            updateWifiStatus = true,
-            statusMessage = { accepted ->
-                if (accepted) {
-                    "Wi-Fi service ${if (enabled) "starting on ESP…" else "stopping on ESP…"}"
-                } else {
-                    "Wi-Fi service command failed"
-                }
-            },
-            onComplete = onResult
-        )
-    }
-
-    fun configureEspWifi(ssid: String, password: String, onResult: ((Boolean, String) -> Unit)? = null) {
-        val cleanSsid = ssid.trim()
-        if (cleanSsid.isBlank()) {
-            publishWifi("Enter a Wi-Fi SSID first")
-            onResult?.invoke(false, wifiControlStatus)
-            return
-        }
-        if ('|' in cleanSsid || '|' in password) {
-            publishWifi("Wi-Fi SSID/password cannot contain |")
-            onResult?.invoke(false, wifiControlStatus)
-            return
-        }
-        writeControlCommand(
-            "wifi=$cleanSsid|$password",
-            updateWifiStatus = true,
-            statusMessage = { accepted ->
-                if (accepted) {
-                    "Credentials queued for \"$cleanSsid\". Waiting for ESP to join…"
-                } else {
-                    "Could not send Wi-Fi credentials"
-                }
-            },
-            onComplete = { accepted ->
-                onResult?.invoke(accepted, wifiControlStatus)
-            }
-        )
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun writeControlCommand(
-        command: String,
-        updateWifiStatus: Boolean = false,
-        statusMessage: (Boolean) -> String,
-        onComplete: ((Boolean) -> Unit)? = null
-    ) {
-        val characteristic = controlCharacteristic
-        val activeGatt = gatt
-        if (!connected || characteristic == null || activeGatt == null) {
-            val message = "ESP control not ready"
-            if (updateWifiStatus) publishWifi(message) else publish(message)
-            onComplete?.invoke(false)
-            return
-        }
-        if (!hasConnectPermission()) {
-            val message = "Bluetooth connect permission needed"
-            if (updateWifiStatus) publishWifi(message) else publish(message)
-            onComplete?.invoke(false)
-            return
-        }
-
-        val bytes = command.toByteArray(StandardCharsets.UTF_8)
-        characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-        val accepted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            activeGatt.writeCharacteristic(characteristic, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothStatusCodes.SUCCESS
-        } else {
-            @Suppress("DEPRECATION")
-            characteristic.value = bytes
-            @Suppress("DEPRECATION")
-            activeGatt.writeCharacteristic(characteristic)
-        }
-        val message = statusMessage(accepted)
-        if (updateWifiStatus) {
-            publishWifi(message)
-        } else {
-            publish(message)
-        }
-        onComplete?.invoke(accepted)
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun stopScan(doneStatus: String) {
-        if (scanning && hasScanPermission()) scanner?.stopScan(scanCallback)
-        scanning = false
-        autoScan = false
-        handler.removeCallbacks(scanTimeout)
-        status = doneStatus
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun closeGatt() {
-        if (hasConnectPermission()) gatt?.close()
-        gatt = null
-        controlCharacteristic = null
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun enableNotifications(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-        if (!hasConnectPermission()) return
-        gatt.setCharacteristicNotification(characteristic, true)
-        val descriptor = characteristic.getDescriptor(CccdUuid) ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-        } else {
-            @Suppress("DEPRECATION")
-            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            @Suppress("DEPRECATION")
-            gatt.writeDescriptor(descriptor)
-        }
-    }
-
-    private fun handleBytes(bytes: ByteArray?) {
-        if (bytes == null) return
-        val packet = bytes.toString(StandardCharsets.UTF_8)
-        telemetry = parseTelemetry(packet)
-        handler.post { publishTelemetry() }
-    }
-
-    private fun parseTelemetry(packet: String): InjectorTelemetry {
-        val values = packet.split(',')
-            .mapNotNull {
-                val parts = it.split('=', limit = 2)
-                if (parts.size == 2) parts[0].trim() to parts[1].trim() else null
-            }
-            .toMap()
-        return InjectorTelemetry(
-            widthUs = values["width_us"].toDoubleOrZero(),
-            pulsesPerSecond = values["pps"].toDoubleOrZero(),
-            duty = values["duty"].toDoubleOrZero(),
-            gallonsPerHour = values["gph"].toDoubleOrZero(),
-            injectorFlowLbHr = values["flow_lb_hr"].toDoubleOrZero().takeIf { it > 0.0 } ?: 19.0,
-            injectorCount = values["injectors"]?.toIntOrNull() ?: 8,
-            signalActive = values["signal"] == "1",
-            simulatedTelemetryEnabled = values["sim"] == "1",
-            wifiServiceEnabled = values["wifi_on"] == "1",
-            wifiConnected = values["wifi"] == "1",
-            otaIp = values["ip"]?.takeIf { it.isNotBlank() } ?: "0.0.0.0",
-            wifiAttemptSsid = values["wifi_ssid"]?.takeIf { it.isNotBlank() }.orEmpty(),
-            rawPacket = packet
-        )
-    }
-
-    private fun publish(message: String) {
-        status = message
-        emitState()
-    }
-
-    private fun publishWifi(message: String) {
-        wifiControlStatus = message
-        emitState()
-    }
-
-    private fun publishTelemetry() {
-        status = "Receiving telemetry"
-        emitState()
-    }
-
-    private fun emitState() {
-        val adapter = bluetoothManager?.adapter
-        onState(
-            FuelBleState(
-                supported = adapter != null,
-                bluetoothEnabled = adapter?.isEnabled == true,
-                hasPermissions = hasScanPermission() && hasConnectPermission(),
-                scanning = scanning,
-                connecting = connecting,
-                connected = connected,
-                controlReady = controlCharacteristic != null,
-                status = status,
-                wifiControlStatus = wifiControlStatus,
-                telemetry = telemetry
-            )
-        )
-    }
-
-    fun hasScanPermission(): Boolean {
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-            ContextCompat.checkSelfPermission(appContext, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
-    }
-
-    fun hasConnectPermission(): Boolean {
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-            ContextCompat.checkSelfPermission(appContext, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun readName(result: ScanResult): String {
-        return result.scanRecord?.deviceName ?: readDeviceName(result.device)
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun readAddress(device: BluetoothDevice): String {
-        return if (hasConnectPermission() || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-            runCatching { device.address }.getOrNull().orEmpty()
-        } else {
-            ""
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun readDeviceName(device: BluetoothDevice): String {
-        return if (hasConnectPermission()) runCatching { device.name }.getOrNull().orEmpty() else ""
-    }
-
-    private fun scheduleAutoReconnect(reason: String) {
-        if (userDisconnectRequested || rememberedAddress == null || connected || connecting || scanning) return
-        autoReconnectAttempt += 1
-        val delayMs = if (autoReconnectRetriesRemaining > 0) {
-            autoReconnectRetriesRemaining -= 1
-            AUTO_RECONNECT_FAST_DELAY_MS
-        } else {
-            AUTO_RECONNECT_STEADY_DELAY_MS
-        }
-        publish("$reason; auto-connect retry $autoReconnectAttempt")
-        handler.removeCallbacks(reconnectRunnable)
-        handler.postDelayed(reconnectRunnable, delayMs)
-    }
-
-    companion object {
-        private const val PREF_DEVICE_ADDRESS = "device_address"
-        private const val PREF_DEVICE_NAME = "device_name"
-        private const val AUTO_RECONNECT_RETRIES = 5
-        private const val AUTO_RECONNECT_FAST_DELAY_MS = 2_500L
-        private const val AUTO_RECONNECT_STEADY_DELAY_MS = 15_000L
-    }
-}
-
-private class LocationTracker(
-    context: Context,
-    private val onState: (LocationState) -> Unit
-) {
-    private val appContext = context.applicationContext
-    private val locationManager = appContext.getSystemService(LocationManager::class.java)
-    private var state = LocationState()
-    private var speedSimulationEnabled = true
-    private var simulatedSpeedMph = BenchSpeedMph
-
-    private val listener = object : LocationListener {
-        override fun onLocationChanged(location: Location) {
-            val fixHasSpeed = location.hasSpeed()
-            val fixHasAltitude = location.hasAltitude()
-            val nextAltitudeFt = if (fixHasAltitude) location.altitude * 3.280839895 else state.altitudeFt
-            val nextHasAltitude = state.hasAltitude || fixHasAltitude
-            state = state.copy(
-                hasPermission = hasPermission(),
-                speedMph = if (speedSimulationEnabled) simulatedSpeedMph else if (fixHasSpeed) location.speed * 2.2369362921 else state.speedMph,
-                speedFromCurrentFix = !speedSimulationEnabled && fixHasSpeed,
-                speedSimulated = speedSimulationEnabled,
-                altitudeFt = nextAltitudeFt,
-                hasAltitude = nextHasAltitude,
-                altitudeFromCurrentFix = fixHasAltitude,
-                usingFallbackSpeed = speedSimulationEnabled || !fixHasSpeed,
-                status = when {
-                    speedSimulationEnabled -> "Bench speed simulation: %.0f MPH".format(simulatedSpeedMph)
-                    fixHasSpeed && fixHasAltitude -> "GPS live"
-                    fixHasSpeed -> "GPS live, waiting for altitude"
-                    nextHasAltitude -> "GPS fix, no speed"
-                    else -> "GPS fix, waiting for altitude"
-                }
-            )
-            onState(state)
-        }
-    }
-
-    fun requiredPermissions(): Array<String> = arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
-
-    fun setSimulation(enabled: Boolean, speedMph: Double) {
-        speedSimulationEnabled = enabled
-        simulatedSpeedMph = speedMph
-        state = state.copy(
-            speedMph = if (enabled) speedMph else state.speedMph,
-            speedFromCurrentFix = false,
-            speedSimulated = enabled,
-            usingFallbackSpeed = enabled,
-            altitudeFromCurrentFix = false,
-            status = if (enabled) "Bench speed simulation: %.0f MPH".format(speedMph) else "Waiting for GPS"
-        )
-        onState(state)
-    }
-
-    @SuppressLint("MissingPermission")
-    fun start() {
-        if (!hasPermission()) {
-            state = state.copy(hasPermission = false, status = "Location permission needed")
-            onState(state)
-            return
-        }
-        state = state.copy(
-            hasPermission = true,
-            speedMph = if (speedSimulationEnabled) simulatedSpeedMph else state.speedMph,
-            speedFromCurrentFix = false,
-            speedSimulated = speedSimulationEnabled,
-            usingFallbackSpeed = speedSimulationEnabled,
-            altitudeFromCurrentFix = false,
-            status = if (speedSimulationEnabled) "Bench speed simulation: %.0f MPH".format(simulatedSpeedMph) else "Waiting for GPS"
-        )
-        onState(state)
-        locationManager?.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0.0f, listener)
-    }
-
-    fun stop() {
-        locationManager?.removeUpdates(listener)
-    }
-
-    fun hasPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
     }
 }
 
@@ -2081,9 +1223,9 @@ private fun GradeTile(gradeState: GradeState, gradeUnit: GradeUnit, modifier: Mo
     Surface(color = PanelAlt, shape = RoundedCornerShape(8.dp), modifier = modifier.height(72.dp)) {
         Box(contentAlignment = Alignment.Center) {
             Canvas(Modifier.fillMaxSize()) {
-                val grade = (gradePercent ?: 0.0).coerceIn(-MAX_GRADE_DISPLAY_PERCENT, MAX_GRADE_DISPLAY_PERCENT)
+                val grade = (gradePercent ?: 0.0).coerceIn(-MaxGradeDisplayPercent, MaxGradeDisplayPercent)
                 val centerY = size.height / 2f
-                val swing = (abs(grade) / MAX_GRADE_DISPLAY_PERCENT).toFloat() * (size.height * 0.38f)
+                val swing = (abs(grade) / MaxGradeDisplayPercent).toFloat() * (size.height * 0.38f)
                 val leftY = centerY + if (grade >= 0.0) swing else -swing
                 val rightY = centerY - if (grade >= 0.0) swing else -swing
                 val path = androidx.compose.ui.graphics.Path().apply {
@@ -3128,7 +2270,7 @@ private fun OtaWifiCard(
 
     LaunchedEffect(wifiServicePending, desiredWifiOn) {
         if (!wifiServicePending) return@LaunchedEffect
-        delay(WIFI_SERVICE_CONFIRM_TIMEOUT_MS)
+        delay(WifiServiceConfirmTimeoutMs)
         if (wifiServicePending && desiredWifiOn != null && telemetryWifiOn != desiredWifiOn) {
             wifiServicePending = false
             wifiServiceError = "Wi-Fi service did not confirm on the ESP. Try the toggle again."
@@ -3147,7 +2289,7 @@ private fun OtaWifiCard(
 
     LaunchedEffect(credentialPhase, joinWatchStartedMs) {
         if (credentialPhase != WifiCredentialPhase.WaitingJoin || joinWatchStartedMs <= 0L) return@LaunchedEffect
-        delay(WIFI_JOIN_CONFIRM_TIMEOUT_MS)
+        delay(WifiJoinConfirmTimeoutMs)
         if (credentialPhase == WifiCredentialPhase.WaitingJoin) {
             credentialPhase = WifiCredentialPhase.TimedOut
         }
@@ -3187,9 +2329,9 @@ private fun OtaWifiCard(
         credentialPhase == WifiCredentialPhase.WaitingJoin && lastSentSsid.isNotBlank() -> {
             val espSsid = bleState.telemetry.wifiAttemptSsid
             if (espSsid.isNotBlank()) {
-                "ESP trying \"$espSsid\"… (may take up to ${WIFI_JOIN_CONFIRM_TIMEOUT_MS / 1000}s)"
+                "ESP trying \"$espSsid\"… (may take up to ${WifiJoinConfirmTimeoutMs / 1000}s)"
             } else {
-                "Trying to join \"$lastSentSsid\"… (may take up to ${WIFI_JOIN_CONFIRM_TIMEOUT_MS / 1000}s)"
+                "Trying to join \"$lastSentSsid\"… (may take up to ${WifiJoinConfirmTimeoutMs / 1000}s)"
             }
         }
         bleState.telemetry.wifiServiceEnabled && lastSentSsid.isNotBlank() && !bleState.telemetry.wifiConnected -> {
@@ -3810,146 +2952,21 @@ private fun FuelMonitorTheme(content: @Composable () -> Unit) {
     )
 }
 
-private fun String?.toDoubleOrZero(): Double = this?.toDoubleOrNull() ?: 0.0
 
-private fun LocationState.altitudeFor(unit: AltitudeUnit): Double {
-    return when (unit) {
-        AltitudeUnit.Feet -> altitudeFt
-        AltitudeUnit.Meters -> altitudeFt / 3.280839895
-    }
-}
 
-private fun LocationState.altitudeText(unit: AltitudeUnit): String {
-    return if (hasAltitude) {
-        "%.0f %s".format(altitudeFor(unit), unit.label)
-    } else {
-        "- ${unit.label}"
-    }
-}
 
-private fun ActiveTrip.addDistanceSample(speedMph: Double, nowMs: Long, distanceScale: Double): ActiveTrip {
-    if (!active || arrived) return this
-    val lastMs = when {
-        lastDistanceUpdateMs > 0L -> lastDistanceUpdateMs
-        startTimeMs > 0L -> startTimeMs
-        else -> nowMs
-    }
-    val elapsedHours = (nowMs - lastMs).coerceIn(0L, MAX_DISTANCE_SAMPLE_MS) / 3_600_000.0
-    val miles = speedMph.coerceAtLeast(0.0) * distanceScale.coerceIn(0.25, 2.0) * elapsedHours
-    val movingDeltaMs = if (speedMph >= MOVING_SPEED_THRESHOLD_MPH) {
-        (nowMs - lastMs).coerceIn(0L, MAX_DISTANCE_SAMPLE_MS)
-    } else {
-        0L
-    }
-    return copy(
-        distanceOffsetMiles = (distanceOffsetMiles + miles).takeIf { it.isFinite() }?.coerceAtLeast(0.0) ?: distanceOffsetMiles,
-        lastDistanceUpdateMs = nowMs,
-        movingTimeMs = movingTimeMs + movingDeltaMs
-    )
-}
 
-private fun ActiveTrip.milesCompleted(location: LocationState, distanceScale: Double): Double {
-    return distanceOffsetMiles.coerceIn(0.0, plannedMiles.coerceAtLeast(0.0))
-}
 
-private fun ActiveTrip.milesRemaining(location: LocationState, distanceScale: Double): Double {
-    return (plannedMiles - milesCompleted(location, distanceScale)).coerceAtLeast(0.0)
-}
 
-private fun ActiveTrip.movingAverageSpeedMph(): Double? {
-    val movingHours = movingTimeMs / 3_600_000.0
-    if (!active || movingHours <= 0.0 || distanceOffsetMiles <= 0.01) return null
-    return (distanceOffsetMiles / movingHours).takeIf { it.isFinite() && it > 1.0 }
-}
 
-private fun ActiveTrip.etaText(speedMph: Double, distanceScale: Double): String {
-    val avgSpeed = movingAverageSpeedMph() ?: return "-"
-    val hours = milesRemaining(LocationState(speedMph = speedMph), distanceScale) / avgSpeed
-    return formatDuration(hours)
-}
 
-private fun ActiveTrip.arrivalText(speedMph: Double, distanceScale: Double): String {
-    val avgSpeed = movingAverageSpeedMph() ?: return "-"
-    val millis = System.currentTimeMillis() + ((milesRemaining(LocationState(speedMph = speedMph), distanceScale) / avgSpeed) * 3_600_000.0).toLong()
-    return SimpleDateFormat("h:mm a", Locale.US).format(Date(millis))
-}
 
-private fun ActiveTrip.averageSpeedMph(): Double? {
-    return movingAverageSpeedMph()
-}
 
-private fun ActiveTrip.captureArrivalIfNeeded(location: LocationState, distanceScale: Double): ActiveTrip {
-    if (!active || arrived || plannedMiles <= 0.0) return this
-    if (milesCompleted(location, distanceScale) < plannedMiles) return this
 
-    val avgSpeed = movingAverageSpeedMph() ?: 0.0
-    val avgMpg = if (fuelUsedGallons > 0.01) plannedMiles / fuelUsedGallons else 0.0
-    return copy(
-        arrived = true,
-        arrivedTimeMs = System.currentTimeMillis(),
-        arrivedFuelUsedGallons = fuelUsedGallons,
-        arrivedAverageMpg = avgMpg.takeIf { it.isFinite() } ?: 0.0,
-        arrivedAverageSpeedMph = avgSpeed.takeIf { it.isFinite() } ?: 0.0
-    )
-}
 
-private fun ActiveTrip.adjustPlannedMilesFromRemaining(location: LocationState, distanceScale: Double, remainingMiles: Double): ActiveTrip {
-    if (!active || remainingMiles < 0.0) return this
-    val driven = milesCompleted(location, distanceScale)
-    return copy(
-        plannedMiles = (driven + remainingMiles).coerceAtLeast(driven),
-        arrived = false,
-        arrivedTimeMs = 0L,
-        arrivedFuelUsedGallons = 0.0,
-        arrivedAverageMpg = 0.0,
-        arrivedAverageSpeedMph = 0.0
-    )
-}
 
-private fun ActiveTrip.syncDistanceToOdometer(location: LocationState, distanceScale: Double, currentOdometer: Double): ActiveTrip {
-    if (!active || currentOdometer < startOdometer) return this
-    val actualDriven = currentOdometer - startOdometer
-    val currentMiles = distanceOffsetMiles.coerceAtLeast(0.0)
-    val adjustedMovingTime = if (currentMiles > 0.1 && movingTimeMs > 0L) {
-        (movingTimeMs * (actualDriven.coerceAtLeast(0.0) / currentMiles)).toLong().coerceAtLeast(0L)
-    } else {
-        movingTimeMs
-    }
-    return copy(
-        distanceOffsetMiles = actualDriven.coerceAtLeast(0.0),
-        lastDistanceUpdateMs = System.currentTimeMillis(),
-        movingTimeMs = adjustedMovingTime,
-        arrived = false,
-        arrivedTimeMs = 0L,
-        arrivedFuelUsedGallons = 0.0,
-        arrivedAverageMpg = 0.0,
-        arrivedAverageSpeedMph = 0.0
-    )
-}
 
-private fun ActiveTrip.proposedDistanceScale(location: LocationState, currentScale: Double, currentOdometer: Double): Double? {
-    if (!active || startOdometer <= 0.0 || currentOdometer <= startOdometer) return null
-    val actualDriven = currentOdometer - startOdometer
-    if (actualDriven <= 0.1 || distanceOffsetMiles <= 0.1) return null
-    return (currentScale * (actualDriven / distanceOffsetMiles))
-        .takeIf { it.isFinite() }
-        ?.coerceIn(0.25, 2.0)
-        ?: currentScale.takeIf { it.isFinite() }
-}
 
-private fun ActiveTrip.expectedOdometer(location: LocationState, distanceScale: Double, fallbackOdometer: Double): Double {
-    return when {
-        active && startOdometer > 0.0 -> startOdometer + milesCompleted(location, distanceScale)
-        fallbackOdometer > 0.0 -> fallbackOdometer
-        else -> 0.0
-    }
-}
-
-private fun Double.leadingOdometerDigits(): String {
-    if (!isFinite() || this <= 0.0) return ""
-    val whole = kotlin.math.floor(this).toLong().toString()
-    return if (whole.length > 3) whole.dropLast(3) else ""
-}
 
 private fun List<FillupRecord>.toSheetsTsv(): String {
     val header = "date\todometer\tgallons_added\tprice_per_gallon\ttotal_cost\tfilled_to_full\tmpg_since_last_fillup"
@@ -4006,27 +3023,10 @@ private fun FuelHistoryPoint.valueFor(axis: HistoryAxis): Double? {
     }
 }
 
-private fun FuelHistoryPoint.displayMpg(): Double? = instantMpg.takeIfHistoryValid()?.coerceIn(0.0, HistoryMpgDisplayCap)
 
-private fun Double.takeIfHistoryValid(): Double? {
-    return takeIf { it.isHistoryValid() }
-}
 
-private fun Double.isHistoryValid(): Boolean = isFinite() && this != MissingHistoryValue
 
-private fun List<EconomySample>.pruneEconomySamples(nowMs: Long, windowHours: Double): List<EconomySample> {
-    val windowMs = (windowHours.coerceIn(0.05, 24.0) * 3_600_000.0).toLong()
-    val oldest = nowMs - windowMs
-    return filter { it.timestampMs >= oldest && it.miles.isFinite() && it.gallons.isFinite() }
-}
 
-private fun AppSettings.dashboardAverageWindowLabel(): String {
-    return if (dashboardAverageWindowHours < 1.0) {
-        "${(dashboardAverageWindowHours * 60.0).toInt()}m"
-    } else {
-        "${dashboardAverageWindowHours.toInt()}h"
-    }
-}
 
 private fun List<FuelHistoryPoint>.toHistoryTsv(): String {
     val header = "date_time\tspeed_mph\trpm\tinstant_mpg\tgph\tinjector_pulse_width_us\tduty_percent\taltitude_ft\ttank_gallons\tesp_simulated\tphone_speed_simulated"
@@ -4049,10 +3049,6 @@ private fun List<FuelHistoryPoint>.toHistoryTsv(): String {
     return (listOf(header) + rows).joinToString("\n")
 }
 
-private fun List<FuelHistoryPoint>.prunedHistory(nowMs: Long): List<FuelHistoryPoint> {
-    val oldest = nowMs - 30L * 24L * 60L * 60L * 1000L
-    return filter { it.timestampMs >= oldest }.sortedBy { it.timestampMs }
-}
 
 private fun Long.toDayKey(): Int {
     val calendar = Calendar.getInstance()
@@ -4095,13 +3091,6 @@ private fun Double.formatAxis(unit: String): String {
     }
 }
 
-private fun formatDuration(hours: Double): String {
-    if (!hours.isFinite() || hours < 0.0) return "-"
-    val totalMinutes = (hours * 60.0).toLong()
-    val h = totalMinutes / 60L
-    val m = totalMinutes % 60L
-    return if (h > 0L) "${h}h ${m}m" else "${m}m"
-}
 
 private fun String.tileFontSize() = when {
     length >= 14 -> 15.sp
