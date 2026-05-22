@@ -132,6 +132,8 @@ private const val MIN_GRADE_DISTANCE_FEET = 100.0
 private const val MAX_GRADE_DISPLAY_PERCENT = 20.0
 private const val MAX_DISTANCE_SAMPLE_MS = 10_000L
 private const val MOVING_SPEED_THRESHOLD_MPH = 2.0
+private const val MAX_FUEL_INTEGRATION_MS = 5_000L
+private const val FuelDensityLbPerGallon = 6.17
 
 class MainActivity : ComponentActivity() {
     private lateinit var fuelBleClient: FuelBleClient
@@ -151,6 +153,8 @@ class MainActivity : ComponentActivity() {
     private var lastFuelSampleMs = 0L
     private var lastHistorySampleMs = 0L
     private var lastHistoryPruneMs = 0L
+    private var lastSyncedInjectorFlowLbHr: Double? = null
+    private var lastSyncedInjectorCount: Int? = null
 
     private val requestPermissions = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -212,12 +216,20 @@ class MainActivity : ComponentActivity() {
                         saveSettings(appSettings)
                         locationTracker.setSimulation(enabled, BenchSpeedMph)
                     },
-                    onSettingsChanged = {
-                        appSettings = it
-                        rollingEconomySamples = rollingEconomySamples.pruneEconomySamples(System.currentTimeMillis(), it.dashboardAverageWindowHours)
-                        saveSettings(it)
-                        applyKeepScreenOn(it.keepScreenOn)
-                        locationTracker.setSimulation(it.phoneSpeedSimulationEnabled, BenchSpeedMph)
+                    onPrepareVehicleTest = { applyVehicleTestMode() },
+                    onSettingsChanged = { updated ->
+                        val injectorCalibrationChanged = updated.injectorFlowLbHr != appSettings.injectorFlowLbHr ||
+                            updated.injectorCount != appSettings.injectorCount
+                        appSettings = updated
+                        rollingEconomySamples = rollingEconomySamples.pruneEconomySamples(System.currentTimeMillis(), updated.dashboardAverageWindowHours)
+                        saveSettings(updated)
+                        applyKeepScreenOn(updated.keepScreenOn)
+                        locationTracker.setSimulation(updated.phoneSpeedSimulationEnabled, BenchSpeedMph)
+                        if (injectorCalibrationChanged) {
+                            lastSyncedInjectorFlowLbHr = null
+                            lastSyncedInjectorCount = null
+                        }
+                        maybeSyncInjectorSettingsToEsp()
                     },
                     onResetFullTank = {
                         fuelUsedSinceFullGallons = 0.0
@@ -312,7 +324,7 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     onApplyDirectCalibration = { knownMpg ->
-                        val rawGph = bleState.telemetry.gallonsPerHour
+                        val rawGph = effectiveFuelGph(bleState.telemetry, appSettings)
                         val targetGph = locationState.speedMph / knownMpg
                         if (rawGph > 0.01 && targetGph > 0.01 && targetGph.isFinite()) {
                             appSettings = appSettings.copy(
@@ -363,12 +375,38 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun applyVehicleTestMode() {
+        appSettings = appSettings.copy(phoneSpeedSimulationEnabled = false)
+        saveSettings(appSettings)
+        locationTracker.setSimulation(false, BenchSpeedMph)
+        fuelBleClient.setEspSimulation(false)
+    }
+
+    private fun maybeSyncInjectorSettingsToEsp() {
+        if (!bleState.connected || !bleState.controlReady) return
+        val flow = appSettings.injectorFlowLbHr
+        val count = appSettings.injectorCount
+        if (lastSyncedInjectorFlowLbHr == flow && lastSyncedInjectorCount == count) return
+        fuelBleClient.syncInjectorCalibration(flow, count)
+        lastSyncedInjectorFlowLbHr = flow
+        lastSyncedInjectorCount = count
+    }
+
     private fun acceptBleState(state: FuelBleState) {
         val now = System.currentTimeMillis()
+        if (!state.connected) {
+            lastSyncedInjectorFlowLbHr = null
+            lastSyncedInjectorCount = null
+        } else if (state.controlReady) {
+            maybeSyncInjectorSettingsToEsp()
+        }
         if (lastFuelSampleMs > 0L && state.connected) {
-            val hours = (now - lastFuelSampleMs).coerceAtLeast(0L) / 3_600_000.0
-            val gallons = state.telemetry.gallonsPerHour * appSettings.fuelCalibrationMultiplier * hours
-            if (gallons.isFinite() && gallons in 0.0..1.0) {
+            val elapsedMs = (now - lastFuelSampleMs).coerceAtLeast(0L)
+            val integratedMs = minOf(elapsedMs, MAX_FUEL_INTEGRATION_MS)
+            val hours = integratedMs / 3_600_000.0
+            val fuelGph = effectiveFuelGph(state.telemetry, appSettings)
+            val gallons = fuelGph * hours
+            if (gallons.isFinite() && gallons > 0.0 && hours > 0.0) {
                 val miles = (locationState.speedMph * hours).takeIf { it.isFinite() && it >= 0.0 } ?: 0.0
                 rollingEconomySamples = (rollingEconomySamples + EconomySample(now, miles, gallons))
                     .pruneEconomySamples(now, appSettings.dashboardAverageWindowHours)
@@ -584,7 +622,7 @@ class MainActivity : ComponentActivity() {
         if (nowMs - lastHistorySampleMs < HISTORY_SAMPLE_MS) return
         val state = bleState
         val telemetry = state.telemetry
-        val fuelUseGph = telemetry.gallonsPerHour * appSettings.fuelCalibrationMultiplier
+        val fuelUseGph = effectiveFuelGph(telemetry, appSettings)
         val fullLiveMode = state.connected &&
             !telemetry.simulatedTelemetryEnabled &&
             !locationState.speedSimulated
@@ -877,6 +915,15 @@ private fun FuelHistoryPoint.isUsable(): Boolean {
         tankGallons.isFinite()
 }
 
+private fun effectiveFuelGph(telemetry: InjectorTelemetry, settings: AppSettings): Double {
+    val reported = telemetry.gallonsPerHour * settings.fuelCalibrationMultiplier
+    if (reported > MinimumFuelFlowForMpgGph) return reported
+    val duty = telemetry.duty
+    if (duty <= 0.0 || settings.injectorFlowLbHr <= 0.0 || settings.injectorCount <= 0) return 0.0
+    val estimated = (settings.injectorFlowLbHr * settings.injectorCount * duty) / FuelDensityLbPerGallon
+    return estimated * settings.fuelCalibrationMultiplier
+}
+
 private fun calculateInstantMpgForLiveFuel(fuelUseGph: Double, speedMph: Double): Double {
     return if (fuelUseGph > MinimumFuelFlowForMpgGph && speedMph > MinimumSpeedForMpgMph) {
         speedMph / fuelUseGph
@@ -1132,6 +1179,17 @@ private class FuelBleClient(
     fun setEspSimulation(enabled: Boolean) {
         writeControlCommand(if (enabled) "sim=1" else "sim=0") { accepted ->
             if (accepted) "ESP ${if (enabled) "simulation" else "live input"} command sent" else "ESP command failed"
+        }
+    }
+
+    fun syncInjectorCalibration(flowLbHr: Double, injectorCount: Int) {
+        val flow = flowLbHr.coerceIn(1.0, 200.0)
+        val count = injectorCount.coerceIn(1, 16)
+        writeControlCommand("flow=${"%.2f".format(Locale.US, flow)}") { accepted ->
+            if (accepted) "Injector flow sent to ESP" else "Injector flow command failed"
+        }
+        writeControlCommand("injectors=$count") { accepted ->
+            if (accepted) "Injector count sent to ESP" else "Injector count command failed"
         }
     }
 
@@ -1424,6 +1482,7 @@ private fun FuelMonitorApp(
     onSetEspWifiEnabled: (Boolean) -> Unit,
     onConfigureEspWifi: (String, String) -> Unit,
     onSetPhoneSpeedSimulation: (Boolean) -> Unit,
+    onPrepareVehicleTest: () -> Unit,
     onSettingsChanged: (AppSettings) -> Unit,
     onResetFullTank: () -> Unit,
     onSetFuelGaugeFraction: (Double) -> Unit,
@@ -1515,6 +1574,7 @@ private fun FuelMonitorApp(
                 onSetEspWifiEnabled = onSetEspWifiEnabled,
                 onConfigureEspWifi = onConfigureEspWifi,
                 onSetPhoneSpeedSimulation = onSetPhoneSpeedSimulation,
+                onPrepareVehicleTest = onPrepareVehicleTest,
                 scrollState = devicesScroll,
                 modifier = Modifier.padding(padding)
             )
@@ -1555,7 +1615,7 @@ private fun DashboardScreen(
 ) {
     val focusManager = LocalFocusManager.current
     val telemetry = bleState.telemetry
-    val fuelUseGph = telemetry.gallonsPerHour * settings.fuelCalibrationMultiplier
+    val fuelUseGph = effectiveFuelGph(telemetry, settings)
     val mpg = calculateInstantMpgForDisplay(bleState.connected, fuelUseGph, location.speedMph)
     val averageMpg = when {
         activeTrip.active && activeTrip.arrived -> activeTrip.arrivedAverageMpg.takeIf { it > 0.01 }
@@ -2246,7 +2306,7 @@ private fun TripScreen(
 ) {
     val focusManager = LocalFocusManager.current
     val telemetry = bleState.telemetry
-    val fuelUseGph = telemetry.gallonsPerHour * settings.fuelCalibrationMultiplier
+    val fuelUseGph = effectiveFuelGph(telemetry, settings)
     var startOdoText by remember {
         mutableStateOf(
             when {
@@ -2862,6 +2922,7 @@ private fun DevicesScreen(
     onSetEspWifiEnabled: (Boolean) -> Unit,
     onConfigureEspWifi: (String, String) -> Unit,
     onSetPhoneSpeedSimulation: (Boolean) -> Unit,
+    onPrepareVehicleTest: () -> Unit,
     scrollState: ScrollState,
     modifier: Modifier = Modifier
 ) {
@@ -2909,6 +2970,20 @@ private fun DevicesScreen(
                         onCheckedChange = onSetPhoneSpeedSimulation
                     )
                 }
+                Button(
+                    onClick = {
+                        focusManager.clearFocus()
+                        onPrepareVehicleTest()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Prepare for vehicle test")
+                }
+                Text(
+                    "Disables phone speed simulation and sends sim=0 to the ESP when BLE control is ready.",
+                    color = TextMuted,
+                    fontSize = 13.sp
+                )
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     Button(onClick = { focusManager.clearFocus(); onRequestPermissions() }, modifier = Modifier.fillMaxWidth()) {
                         Text(if (bleState.hasPermissions && location.hasPermission) "Check Permissions" else "Grant Permissions")
@@ -3067,7 +3142,7 @@ private fun SettingsScreen(
         )
     }
 
-    val rawGph = bleState.telemetry.gallonsPerHour
+    val rawGph = effectiveFuelGph(bleState.telemetry, settings)
     val directKnownMpg = directMpgText.toDoubleOrNull()
     val directTargetMultiplier = if (directKnownMpg != null && directKnownMpg > 0.0 && location.speedMph > 1.0 && rawGph > 0.01) {
         (location.speedMph / directKnownMpg / rawGph).takeIf { it.isFinite() }?.coerceIn(0.25, 4.0)
@@ -3143,6 +3218,11 @@ private fun SettingsScreen(
                 SettingsNumberField("Tank capacity", tankText, "gal") { tankText = it }
                 SettingsNumberField("Injector flow", flowText, "lb/hr") { flowText = it }
                 SettingsNumberField("Injector count", injectorCountText, "count") { injectorCountText = it }
+                Text(
+                    "Injector flow and count are saved on the phone and sent to the ESP over BLE when connected.",
+                    color = TextMuted,
+                    fontSize = 13.sp
+                )
                 SettingsNumberField("Fuel calibration", multiplierText, "x") { multiplierText = it }
                 Button(onClick = { focusManager.clearFocus(); commitBasicSettings() }, modifier = Modifier.fillMaxWidth()) {
                     Text("Apply Fuel Settings")

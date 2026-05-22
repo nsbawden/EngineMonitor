@@ -10,6 +10,10 @@ An ESP32 reads one injector pulse signal through a protected input circuit and s
 - docs: wiring notes, fuel math, and project planning notes.
 - phone-app: Android app (BLE telemetry, GPS speed, MPG, trips, fill-ups, history).
 
+## Vehicle testing
+
+Before a real drive, follow [docs/vehicle-test-checklist.md](docs/vehicle-test-checklist.md). In the app: **Devices → Prepare for vehicle test** (disables ESP and phone simulation).
+
 ## First milestone
 
 1. Build a protected injector-signal input circuit on the bench.
